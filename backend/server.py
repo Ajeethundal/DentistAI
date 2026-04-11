@@ -1,88 +1,974 @@
-from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+import bcrypt
+import jwt
 import uuid
-from datetime import datetime, timezone
-
-
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+import json
+import asyncio
+from datetime import datetime, timezone, timedelta
+from pydantic import BaseModel, Field
+from typing import List, Optional
+from bson import ObjectId
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
+JWT_ALGORITHM = "HS256"
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- Password Hashing ---
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+
+def get_jwt_secret() -> str:
+    return os.environ["JWT_SECRET"]
+
+def create_access_token(user_id: str, email: str) -> str:
+    payload = {"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(hours=24), "type": "access"}
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+def create_refresh_token(user_id: str) -> str:
+    payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+async def get_current_user(request: Request) -> dict:
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        user["_id"] = str(user["_id"])
+        user.pop("password_hash", None)
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# --- Pydantic Models ---
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    practice_name: Optional[str] = "My Dental Practice"
+
+class AriaChatRequest(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None
+
+class AppointmentCreate(BaseModel):
+    patient_name: str
+    patient_phone: Optional[str] = ""
+    date: str
+    time: str
+    duration_mins: Optional[int] = 30
+    treatment_type: str
+    notes: Optional[str] = ""
+    notify_patient: Optional[bool] = False
+
+class AppointmentUpdate(BaseModel):
+    date: Optional[str] = None
+    time: Optional[str] = None
+    treatment_type: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+class PatientCreate(BaseModel):
+    name: str
+    phone: str
+    email: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class PatientUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+
+class SettingsUpdate(BaseModel):
+    practice_name: Optional[str] = None
+    doctor_name: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    office_hours: Optional[dict] = None
+    aria_voice: Optional[str] = None
+    aria_language: Optional[str] = None
+    aria_tone: Optional[str] = None
+
+class MessageSend(BaseModel):
+    patient_id: str
+    body: str
+
+class FollowUpAction(BaseModel):
+    action: str  # call, whatsapp, dismiss
+    patient_id: str
+    appointment_id: Optional[str] = None
+
+# --- AUTH ROUTES ---
+@api_router.post("/auth/login")
+async def login(req: LoginRequest, response: Response):
+    email = req.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    user_id = str(user["_id"])
+    access_token = create_access_token(user_id, email)
+    refresh_token = create_refresh_token(user_id)
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    return {"id": user_id, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "doctor"), "practice_id": user.get("practice_id", ""), "token": access_token}
+
+@api_router.post("/auth/register")
+async def register(req: RegisterRequest, response: Response):
+    email = req.email.lower().strip()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    practice_id = str(uuid.uuid4())
+    await db.practices.insert_one({
+        "practice_id": practice_id, "name": req.practice_name, "doctor_name": req.name,
+        "phone": "", "address": "", "office_hours": {"mon": "9:00-17:00", "tue": "9:00-17:00", "wed": "9:00-17:00", "thu": "9:00-17:00", "fri": "9:00-17:00", "sat": "closed", "sun": "closed"},
+        "aria_voice": "professional", "aria_language": "English", "aria_tone": "warm",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    hashed = hash_password(req.password)
+    result = await db.users.insert_one({"email": email, "password_hash": hashed, "name": req.name, "role": "doctor", "practice_id": practice_id, "created_at": datetime.now(timezone.utc).isoformat()})
+    user_id = str(result.inserted_id)
+    access_token = create_access_token(user_id, email)
+    refresh_token = create_refresh_token(user_id)
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    return {"id": user_id, "email": email, "name": req.name, "role": "doctor", "practice_id": practice_id, "token": access_token}
+
+@api_router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    return {"message": "Logged out"}
+
+@api_router.get("/auth/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    return user
+
+# --- DASHBOARD ---
+@api_router.get("/dashboard/stats")
+async def get_dashboard_stats(user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    this_week_start = (datetime.now(timezone.utc) - timedelta(days=datetime.now(timezone.utc).weekday())).strftime("%Y-%m-%d")
     
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
+    calls_today = await db.calls.count_documents({"practice_id": practice_id, "created_at": {"$regex": f"^{today}"}})
+    calls_yesterday = await db.calls.count_documents({"practice_id": practice_id, "created_at": {"$regex": f"^{(datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')}"}})
+    appointments_week = await db.appointments.count_documents({"practice_id": practice_id, "date": {"$gte": this_week_start}})
+    messages_sent = await db.messages.count_documents({"practice_id": practice_id, "direction": "outbound"})
+    total_appts_month = await db.appointments.count_documents({"practice_id": practice_id})
+    no_shows = await db.appointments.count_documents({"practice_id": practice_id, "status": "noshow"})
+    no_show_rate = round((no_shows / max(total_appts_month, 1)) * 100, 1)
     
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+    return {
+        "calls_today": calls_today, "calls_yesterday": calls_yesterday,
+        "appointments_week": appointments_week, "messages_sent": messages_sent,
+        "no_show_rate": no_show_rate, "total_patients": await db.patients.count_documents({"practice_id": practice_id})
+    }
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+@api_router.get("/dashboard/today-schedule")
+async def get_today_schedule(user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    appointments = await db.appointments.find({"practice_id": practice_id, "date": today}, {"_id": 0}).sort("time", 1).to_list(50)
+    return appointments
 
-# Include the router in the main app
+# --- ACTIVITY FEED ---
+@api_router.get("/activity-feed")
+async def get_activity_feed(user: dict = Depends(get_current_user), limit: int = 20):
+    practice_id = user.get("practice_id", "")
+    items = await db.activity_feed.find({"practice_id": practice_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return items
+
+# --- ARIA CHAT ---
+@api_router.post("/aria/chat")
+async def aria_chat(req: AriaChatRequest, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    practice_name = practice.get("name", "the dental practice") if practice else "the dental practice"
+    doctor_name = practice.get("doctor_name", user.get("name", "Doctor")) if practice else user.get("name", "Doctor")
+    
+    conversation_id = req.conversation_id or str(uuid.uuid4())
+    
+    # Save user message
+    await db.aria_conversations.insert_one({
+        "conversation_id": conversation_id, "practice_id": practice_id,
+        "role": "user", "content": req.message, "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    # Get conversation history
+    history = await db.aria_conversations.find(
+        {"conversation_id": conversation_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50)
+    
+    # Build context
+    today_str = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
+    todays_appts = await db.appointments.find({"practice_id": practice_id, "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")}, {"_id": 0}).to_list(20)
+    tomorrows_appts = await db.appointments.find({"practice_id": practice_id, "date": (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")}, {"_id": 0}).to_list(20)
+    recent_patients = await db.patients.find({"practice_id": practice_id}, {"_id": 0}).sort("created_at", -1).to_list(10)
+    no_shows = await db.appointments.find({"practice_id": practice_id, "status": "noshow"}, {"_id": 0}).to_list(10)
+    
+    system_prompt = f"""You are ARIA, the AI Receptionist & Intelligence Assistant for {practice_name}, Dr. {doctor_name}'s dental practice.
+
+YOUR PERSONALITY:
+- Warm, professional, and confident — like the best receptionist the practice ever had
+- You speak clearly and naturally — never robotic, never stiff
+- You care about patients and about helping the doctor run a smooth practice
+- You are proactive: you don't just answer questions, you take action
+
+TODAY'S DATE: {today_str}
+
+TODAY'S APPOINTMENTS:
+{json.dumps(todays_appts, indent=2) if todays_appts else "No appointments today."}
+
+TOMORROW'S APPOINTMENTS:
+{json.dumps(tomorrows_appts, indent=2) if tomorrows_appts else "No appointments tomorrow."}
+
+RECENT PATIENTS:
+{json.dumps(recent_patients[:5], indent=2) if recent_patients else "No patients yet."}
+
+NO-SHOWS THIS WEEK:
+{json.dumps(no_shows, indent=2) if no_shows else "No no-shows this week."}
+
+STATS:
+- Total patients: {await db.patients.count_documents({"practice_id": practice_id})}
+- Appointments this week: {await db.appointments.count_documents({"practice_id": practice_id})}
+
+When answering:
+- Be concise but warm. Use the data above to answer questions about the schedule.
+- When the doctor asks you to book, cancel, or reschedule, confirm you've done it.
+- When asked about stats, give specific numbers from the data.
+- Show which actions you took using tool indicators like [Calendar checked] [WhatsApp sent].
+- For demo mode: simulate actions and confirm them as done.
+"""
+
+    tools_used = []
+    msg_lower = req.message.lower()
+    
+    # Detect actions from message
+    if any(w in msg_lower for w in ["book", "schedule", "add appointment", "set up"]):
+        tools_used.append({"icon": "calendar", "label": "Calendar checked"})
+        tools_used.append({"icon": "calendar", "label": "Appointment booked"})
+        if "whatsapp" in msg_lower or "notify" in msg_lower or "send" in msg_lower:
+            tools_used.append({"icon": "whatsapp", "label": "WhatsApp sent"})
+    elif any(w in msg_lower for w in ["cancel", "remove"]):
+        tools_used.append({"icon": "calendar", "label": "Appointment cancelled"})
+    elif any(w in msg_lower for w in ["reschedule", "move", "change"]):
+        tools_used.append({"icon": "calendar", "label": "Appointment rescheduled"})
+    elif any(w in msg_lower for w in ["call", "follow up", "follow-up"]):
+        tools_used.append({"icon": "phone", "label": "Outbound call queued"})
+    elif any(w in msg_lower for w in ["tomorrow", "today", "calendar", "schedule", "what's on", "what does"]):
+        tools_used.append({"icon": "calendar", "label": "Calendar checked"})
+    elif any(w in msg_lower for w in ["no-show", "noshow", "missed", "no show"]):
+        tools_used.append({"icon": "stats", "label": "Records checked"})
+    elif any(w in msg_lower for w in ["patient", "how many", "stats", "summary"]):
+        tools_used.append({"icon": "stats", "label": "Database queried"})
+    
+    # Call Claude via emergentintegrations
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"aria-{conversation_id}",
+            system_message=system_prompt
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        
+        user_message = UserMessage(text=req.message)
+        aria_response = await chat.send_message(user_message)
+    except Exception as e:
+        logger.error(f"ARIA chat error: {e}")
+        aria_response = f"I'm having a brief connection issue, but I'm still here! Let me help you with that. Based on what I can see in the schedule, I have all the information ready. Could you try asking me again?"
+    
+    # Save ARIA response
+    await db.aria_conversations.insert_one({
+        "conversation_id": conversation_id, "practice_id": practice_id,
+        "role": "assistant", "content": aria_response, "tools_used": tools_used,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    # Log to activity feed if action was taken
+    if tools_used:
+        await db.activity_feed.insert_one({
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "type": tools_used[0]["icon"], "description": f"ARIA: {req.message[:100]}",
+            "patient_name": "", "status": "done", "created_at": datetime.now(timezone.utc).isoformat()
+        })
+    
+    return {
+        "response": aria_response, "conversation_id": conversation_id,
+        "tools_used": tools_used, "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@api_router.get("/aria/conversations/{conversation_id}")
+async def get_aria_conversation(conversation_id: str, user: dict = Depends(get_current_user)):
+    messages = await db.aria_conversations.find(
+        {"conversation_id": conversation_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(100)
+    return messages
+
+# --- APPOINTMENTS ---
+@api_router.get("/appointments")
+async def get_appointments(user: dict = Depends(get_current_user), date_from: Optional[str] = None, date_to: Optional[str] = None):
+    practice_id = user.get("practice_id", "")
+    query = {"practice_id": practice_id}
+    if date_from:
+        query["date"] = {"$gte": date_from}
+    if date_to:
+        if "date" in query:
+            query["date"]["$lte"] = date_to
+        else:
+            query["date"] = {"$lte": date_to}
+    appointments = await db.appointments.find(query, {"_id": 0}).sort([("date", 1), ("time", 1)]).to_list(500)
+    return appointments
+
+@api_router.post("/appointments")
+async def create_appointment(req: AppointmentCreate, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    appt_id = str(uuid.uuid4())
+    
+    # Find or create patient
+    patient = await db.patients.find_one({"practice_id": practice_id, "name": {"$regex": req.patient_name, "$options": "i"}}, {"_id": 0})
+    patient_id = patient["id"] if patient else str(uuid.uuid4())
+    
+    if not patient:
+        await db.patients.insert_one({
+            "id": patient_id, "practice_id": practice_id, "name": req.patient_name,
+            "phone": req.patient_phone, "email": "", "status": "new",
+            "total_visits": 0, "notes": "", "created_at": datetime.now(timezone.utc).isoformat()
+        })
+    
+    appointment = {
+        "id": appt_id, "practice_id": practice_id, "patient_id": patient_id,
+        "patient_name": req.patient_name, "patient_phone": req.patient_phone,
+        "date": req.date, "time": req.time, "duration_mins": req.duration_mins,
+        "treatment_type": req.treatment_type, "status": "confirmed",
+        "notes": req.notes, "created_by": "doctor",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.appointments.insert_one(appointment)
+    
+    # Log activity
+    await db.activity_feed.insert_one({
+        "id": str(uuid.uuid4()), "practice_id": practice_id,
+        "type": "booking", "description": f"Booked {req.treatment_type} for {req.patient_name} — {req.date} at {req.time}",
+        "patient_name": req.patient_name, "status": "done",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    appt_copy = {k: v for k, v in appointment.items() if k != "_id"}
+    return appt_copy
+
+@api_router.put("/appointments/{appointment_id}")
+async def update_appointment(appointment_id: str, req: AppointmentUpdate, user: dict = Depends(get_current_user)):
+    update_data = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    await db.appointments.update_one({"id": appointment_id}, {"$set": update_data})
+    updated = await db.appointments.find_one({"id": appointment_id}, {"_id": 0})
+    return updated
+
+@api_router.delete("/appointments/{appointment_id}")
+async def delete_appointment(appointment_id: str, user: dict = Depends(get_current_user)):
+    await db.appointments.delete_one({"id": appointment_id})
+    return {"message": "Appointment deleted"}
+
+# --- PATIENTS ---
+@api_router.get("/patients")
+async def get_patients(user: dict = Depends(get_current_user), search: Optional[str] = None):
+    practice_id = user.get("practice_id", "")
+    query = {"practice_id": practice_id}
+    if search:
+        query["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}}
+        ]
+    patients = await db.patients.find(query, {"_id": 0}).sort("name", 1).to_list(500)
+    
+    # Enrich with appointment data
+    for p in patients:
+        last_appt = await db.appointments.find_one(
+            {"practice_id": practice_id, "patient_id": p["id"], "status": {"$in": ["completed", "confirmed"]}},
+            {"_id": 0}
+        )
+        next_appt = await db.appointments.find_one(
+            {"practice_id": practice_id, "patient_id": p["id"], "date": {"$gte": datetime.now(timezone.utc).strftime("%Y-%m-%d")}, "status": {"$in": ["confirmed", "pending"]}},
+            {"_id": 0}
+        )
+        p["last_visit"] = last_appt["date"] if last_appt else None
+        p["next_appointment"] = f"{next_appt['date']} {next_appt['time']}" if next_appt else None
+    return patients
+
+@api_router.get("/patients/{patient_id}")
+async def get_patient(patient_id: str, user: dict = Depends(get_current_user)):
+    patient = await db.patients.find_one({"id": patient_id}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    # Get related data
+    patient["appointments"] = await db.appointments.find({"patient_id": patient_id}, {"_id": 0}).sort("date", -1).to_list(50)
+    patient["calls"] = await db.calls.find({"patient_id": patient_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    patient["messages"] = await db.messages.find({"patient_id": patient_id}, {"_id": 0}).sort("created_at", 1).to_list(100)
+    return patient
+
+@api_router.post("/patients")
+async def create_patient(req: PatientCreate, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    patient_id = str(uuid.uuid4())
+    patient = {
+        "id": patient_id, "practice_id": practice_id, "name": req.name,
+        "phone": req.phone, "email": req.email, "status": "new",
+        "total_visits": 0, "notes": req.notes, "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.patients.insert_one(patient)
+    patient_copy = {k: v for k, v in patient.items() if k != "_id"}
+    return patient_copy
+
+@api_router.put("/patients/{patient_id}")
+async def update_patient(patient_id: str, req: PatientUpdate, user: dict = Depends(get_current_user)):
+    update_data = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    await db.appointments.update_one({"id": patient_id}, {"$set": update_data})
+    updated = await db.patients.find_one({"id": patient_id}, {"_id": 0})
+    return updated
+
+# --- CALLS ---
+@api_router.get("/calls")
+async def get_calls(user: dict = Depends(get_current_user), direction: Optional[str] = None):
+    practice_id = user.get("practice_id", "")
+    query = {"practice_id": practice_id}
+    if direction:
+        query["direction"] = direction
+    calls = await db.calls.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return calls
+
+@api_router.get("/calls/{call_id}")
+async def get_call(call_id: str, user: dict = Depends(get_current_user)):
+    call = await db.calls.find_one({"id": call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return call
+
+# --- MESSAGES (WhatsApp) ---
+@api_router.get("/messages/conversations")
+async def get_conversations(user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    # Get unique patient conversations
+    patients_with_messages = await db.messages.aggregate([
+        {"$match": {"practice_id": practice_id}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$patient_id", "last_message": {"$first": "$body"}, "last_time": {"$first": "$created_at"}, "unread": {"$sum": {"$cond": [{"$and": [{"$eq": ["$direction", "inbound"]}, {"$eq": ["$read", False]}]}, 1, 0]}}}},
+        {"$sort": {"last_time": -1}}
+    ]).to_list(100)
+    
+    conversations = []
+    for conv in patients_with_messages:
+        patient = await db.patients.find_one({"id": conv["_id"]}, {"_id": 0})
+        if patient:
+            conversations.append({
+                "patient_id": conv["_id"], "patient_name": patient.get("name", "Unknown"),
+                "phone": patient.get("phone", ""), "last_message": conv["last_message"],
+                "last_time": conv["last_time"], "unread": conv["unread"],
+                "aria_handling": True
+            })
+    return conversations
+
+@api_router.get("/messages/{patient_id}")
+async def get_messages(patient_id: str, user: dict = Depends(get_current_user)):
+    messages = await db.messages.find({"patient_id": patient_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    # Mark as read
+    await db.messages.update_many({"patient_id": patient_id, "direction": "inbound"}, {"$set": {"read": True}})
+    return messages
+
+@api_router.post("/messages/send")
+async def send_message(req: MessageSend, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    msg = {
+        "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": req.patient_id,
+        "direction": "outbound", "body": req.body, "sender": "doctor",
+        "read": True, "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.messages.insert_one(msg)
+    msg_copy = {k: v for k, v in msg.items() if k != "_id"}
+    return msg_copy
+
+# --- FOLLOW-UPS ---
+@api_router.get("/follow-ups")
+async def get_follow_ups(user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    six_months_ago = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%Y-%m-%d")
+    
+    # No-shows this week
+    no_shows = await db.appointments.find({"practice_id": practice_id, "status": "noshow"}, {"_id": 0}).to_list(50)
+    
+    # Overdue recalls (patients with last visit > 6 months ago)
+    all_patients = await db.patients.find({"practice_id": practice_id}, {"_id": 0}).to_list(500)
+    overdue = []
+    for p in all_patients:
+        last_appt = await db.appointments.find_one(
+            {"patient_id": p["id"], "status": "completed"}, {"_id": 0}
+        )
+        if last_appt and last_appt.get("date", "") < six_months_ago:
+            overdue.append({**p, "last_appointment": last_appt})
+        elif not last_appt and p.get("created_at", "") < six_months_ago:
+            overdue.append(p)
+    
+    # Pending confirmations for tomorrow
+    pending = await db.appointments.find({"practice_id": practice_id, "date": tomorrow, "status": "pending"}, {"_id": 0}).to_list(50)
+    
+    return {"no_shows": no_shows, "overdue_recalls": overdue[:20], "pending_confirmations": pending}
+
+@api_router.post("/follow-ups/action")
+async def follow_up_action(req: FollowUpAction, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    if req.action == "dismiss" and req.appointment_id:
+        await db.appointments.update_one({"id": req.appointment_id}, {"$set": {"status": "cancelled"}})
+    
+    await db.activity_feed.insert_one({
+        "id": str(uuid.uuid4()), "practice_id": practice_id,
+        "type": "followup", "description": f"Follow-up {req.action} for patient",
+        "patient_name": "", "status": "done",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    return {"message": f"Follow-up action '{req.action}' completed"}
+
+# --- SETTINGS ---
+@api_router.get("/settings")
+async def get_settings(user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    if not practice:
+        return {"practice_id": practice_id, "name": "My Practice", "doctor_name": user.get("name", "")}
+    return practice
+
+@api_router.put("/settings")
+async def update_settings(req: SettingsUpdate, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    update_data = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    await db.practices.update_one({"practice_id": practice_id}, {"$set": update_data})
+    updated = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    return updated
+
+# --- WEBHOOKS (Demo mode) ---
+@api_router.post("/webhooks/retell")
+async def webhook_retell(request: Request):
+    body = await request.json()
+    logger.info(f"Retell webhook received: {json.dumps(body)[:200]}")
+    return {"status": "received"}
+
+@api_router.post("/webhooks/whatsapp")
+async def webhook_whatsapp(request: Request):
+    body = await request.json()
+    logger.info(f"WhatsApp webhook received: {json.dumps(body)[:200]}")
+    return {"status": "received"}
+
+# --- DEMO DATA SEEDING ---
+async def seed_demo_data(practice_id: str):
+    """Seed rich demo data for the practice"""
+    existing = await db.patients.find_one({"practice_id": practice_id})
+    if existing:
+        return
+    
+    logger.info("Seeding demo data...")
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    # 12 Demo patients
+    patients = [
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Sarah Mitchell", "phone": "+1-555-0101", "email": "sarah.m@email.com", "status": "active", "total_visits": 8, "notes": "Prefers morning appointments", "created_at": (now - timedelta(days=365)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Ahmed Hassan", "phone": "+1-555-0102", "email": "ahmed.h@email.com", "status": "active", "total_visits": 5, "notes": "Sensitive to cold water", "created_at": (now - timedelta(days=200)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Maria Santos", "phone": "+1-555-0103", "email": "maria.s@email.com", "status": "active", "total_visits": 12, "notes": "Regular cleanings every 3 months", "created_at": (now - timedelta(days=500)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "James Wilson", "phone": "+1-555-0104", "email": "james.w@email.com", "status": "active", "total_visits": 3, "notes": "", "created_at": (now - timedelta(days=90)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Lisa Chen", "phone": "+1-555-0105", "email": "lisa.c@email.com", "status": "active", "total_visits": 6, "notes": "Dental anxiety - needs extra care", "created_at": (now - timedelta(days=300)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Robert Johnson", "phone": "+1-555-0106", "email": "robert.j@email.com", "status": "inactive", "total_visits": 2, "notes": "Last visit was 8 months ago", "created_at": (now - timedelta(days=400)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Emma Davis", "phone": "+1-555-0107", "email": "emma.d@email.com", "status": "active", "total_visits": 15, "notes": "Long-term patient, very punctual", "created_at": (now - timedelta(days=730)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "David Kim", "phone": "+1-555-0108", "email": "david.k@email.com", "status": "new", "total_visits": 0, "notes": "Referred by Sarah Mitchell", "created_at": (now - timedelta(days=3)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Sofia Rodriguez", "phone": "+1-555-0109", "email": "sofia.r@email.com", "status": "active", "total_visits": 7, "notes": "Prefers Spanish communications", "created_at": (now - timedelta(days=250)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Michael Brown", "phone": "+1-555-0110", "email": "michael.b@email.com", "status": "active", "total_visits": 4, "notes": "Insurance: Delta Dental", "created_at": (now - timedelta(days=180)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Anna Kowalski", "phone": "+1-555-0111", "email": "anna.k@email.com", "status": "active", "total_visits": 9, "notes": "Orthodontic treatment ongoing", "created_at": (now - timedelta(days=400)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Tom Nguyen", "phone": "+1-555-0112", "email": "tom.n@email.com", "status": "new", "total_visits": 1, "notes": "First visit consultation done", "created_at": (now - timedelta(days=7)).isoformat()},
+    ]
+    await db.patients.insert_many(patients)
+    
+    treatments = ["Cleaning", "X-ray", "Crown", "Root Canal", "Extraction", "Consultation", "Filling", "Whitening"]
+    statuses_past = ["completed", "completed", "completed", "noshow", "completed", "cancelled"]
+    times = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30", "16:00"]
+    
+    appointments = []
+    # Past appointments
+    for i in range(20):
+        days_ago = i * 2 + 1
+        p = patients[i % len(patients)]
+        appointments.append({
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"],
+            "patient_name": p["name"], "patient_phone": p["phone"],
+            "date": (now - timedelta(days=days_ago)).strftime("%Y-%m-%d"),
+            "time": times[i % len(times)], "duration_mins": 30,
+            "treatment_type": treatments[i % len(treatments)],
+            "status": statuses_past[i % len(statuses_past)],
+            "notes": "", "created_by": "aria" if i % 3 == 0 else "doctor",
+            "created_at": (now - timedelta(days=days_ago + 1)).isoformat()
+        })
+    
+    # Today's appointments
+    today_patients = [patients[0], patients[2], patients[4], patients[7], patients[10]]
+    today_times = ["09:00", "10:30", "13:00", "14:30", "16:00"]
+    today_treatments = ["Cleaning", "Crown", "X-ray", "Consultation", "Filling"]
+    today_statuses = ["completed", "confirmed", "confirmed", "pending", "confirmed"]
+    for i, p in enumerate(today_patients):
+        appointments.append({
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"],
+            "patient_name": p["name"], "patient_phone": p["phone"],
+            "date": today, "time": today_times[i], "duration_mins": 30,
+            "treatment_type": today_treatments[i], "status": today_statuses[i],
+            "notes": "", "created_by": "aria", "created_at": (now - timedelta(hours=12)).isoformat()
+        })
+    
+    # Tomorrow's appointments
+    tmrw_patients = [patients[1], patients[3], patients[5], patients[8]]
+    tmrw_times = ["09:30", "11:00", "14:00", "15:30"]
+    tmrw_treatments = ["Root Canal", "Cleaning", "Extraction", "Whitening"]
+    for i, p in enumerate(tmrw_patients):
+        appointments.append({
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"],
+            "patient_name": p["name"], "patient_phone": p["phone"],
+            "date": tomorrow, "time": tmrw_times[i], "duration_mins": 45 if i == 0 else 30,
+            "treatment_type": tmrw_treatments[i], "status": "pending" if i % 2 == 0 else "confirmed",
+            "notes": "", "created_by": "aria", "created_at": now.isoformat()
+        })
+    
+    # Future appointments
+    for i in range(6):
+        p = patients[(i + 3) % len(patients)]
+        appointments.append({
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"],
+            "patient_name": p["name"], "patient_phone": p["phone"],
+            "date": (now + timedelta(days=i + 2)).strftime("%Y-%m-%d"),
+            "time": times[(i + 5) % len(times)], "duration_mins": 30,
+            "treatment_type": treatments[(i + 2) % len(treatments)],
+            "status": "confirmed", "notes": "", "created_by": "doctor",
+            "created_at": now.isoformat()
+        })
+    
+    await db.appointments.insert_many(appointments)
+    
+    # Demo calls with transcripts
+    demo_calls = [
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[0]["id"],
+            "patient_name": patients[0]["name"], "phone": patients[0]["phone"],
+            "direction": "inbound", "duration_secs": 185,
+            "transcript": [
+                {"speaker": "patient", "text": "Hi, I need to make an appointment"},
+                {"speaker": "aria", "text": "Of course! I'd be happy to help. Can I get your name please?"},
+                {"speaker": "patient", "text": "Sarah, Sarah Mitchell"},
+                {"speaker": "aria", "text": "Perfect, Sarah! What brings you in — is this a routine cleaning or something specific?"},
+                {"speaker": "patient", "text": "Just a cleaning, but I'd also like an X-ray"},
+                {"speaker": "aria", "text": "No problem. We have availability this Thursday at 2pm or Friday at 10am. Which works better for you?"},
+                {"speaker": "patient", "text": "Thursday at 2 is great"},
+                {"speaker": "aria", "text": "You're all set, Sarah! I've booked you for Thursday at 2pm for a cleaning and X-ray. I'll send you a WhatsApp confirmation right now. Is this number the best to reach you?"},
+                {"speaker": "patient", "text": "Yes, that's perfect. Thank you!"},
+                {"speaker": "aria", "text": "You're welcome, Sarah! We'll see you Thursday. Have a wonderful day!"}
+            ],
+            "outcome": "booked", "created_at": (now - timedelta(hours=3)).isoformat()
+        },
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[1]["id"],
+            "patient_name": patients[1]["name"], "phone": patients[1]["phone"],
+            "direction": "inbound", "duration_secs": 120,
+            "transcript": [
+                {"speaker": "patient", "text": "Hello, I need to reschedule my appointment"},
+                {"speaker": "aria", "text": "Hi Ahmed! I can help with that. You currently have an appointment scheduled for tomorrow at 9:30am. When would you like to reschedule?"},
+                {"speaker": "patient", "text": "Can we do Friday instead, same time?"},
+                {"speaker": "aria", "text": "Friday at 9:30am is available! I've moved your root canal appointment to Friday. I'll send you an updated confirmation via WhatsApp."},
+                {"speaker": "patient", "text": "Great, thanks"},
+                {"speaker": "aria", "text": "You're welcome, Ahmed! See you Friday."}
+            ],
+            "outcome": "rescheduled", "created_at": (now - timedelta(hours=5)).isoformat()
+        },
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[7]["id"],
+            "patient_name": patients[7]["name"], "phone": patients[7]["phone"],
+            "direction": "inbound", "duration_secs": 210,
+            "transcript": [
+                {"speaker": "patient", "text": "Hi, I'm a new patient. Sarah Mitchell referred me."},
+                {"speaker": "aria", "text": "Welcome! We love referrals from Sarah. I'm ARIA, the receptionist at Dr. Smith's office. Can I get your name?"},
+                {"speaker": "patient", "text": "David Kim"},
+                {"speaker": "aria", "text": "Nice to meet you, David! What brings you in today?"},
+                {"speaker": "patient", "text": "I need a general consultation, haven't been to a dentist in a while"},
+                {"speaker": "aria", "text": "No worries at all! We have a new patient consultation available this Thursday at 2:30pm. That includes a full exam and X-rays. Does that work for you?"},
+                {"speaker": "patient", "text": "That works perfectly"},
+                {"speaker": "aria", "text": "Wonderful! I've booked you for Thursday at 2:30pm. I'll send you a WhatsApp message with all the details and some new patient forms. What's the best number to reach you?"},
+                {"speaker": "patient", "text": "555-0108"},
+                {"speaker": "aria", "text": "Got it! You're all set, David. Welcome to the practice!"}
+            ],
+            "outcome": "booked", "created_at": (now - timedelta(days=2)).isoformat()
+        },
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[5]["id"],
+            "patient_name": patients[5]["name"], "phone": patients[5]["phone"],
+            "direction": "outbound", "duration_secs": 45,
+            "transcript": [
+                {"speaker": "aria", "text": "Hi Robert, this is ARIA calling from Dr. Smith's dental office. We noticed you missed your appointment yesterday and wanted to check in."},
+                {"speaker": "patient", "text": "Oh sorry, I completely forgot about it"},
+                {"speaker": "aria", "text": "No worries at all! Would you like me to reschedule? We have openings next week."},
+                {"speaker": "patient", "text": "Yeah, let me check my calendar and call back"},
+                {"speaker": "aria", "text": "Sounds good! We'll be here whenever you're ready. Take care, Robert!"}
+            ],
+            "outcome": "no_action", "created_at": (now - timedelta(hours=6)).isoformat()
+        },
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[4]["id"],
+            "patient_name": patients[4]["name"], "phone": patients[4]["phone"],
+            "direction": "inbound", "duration_secs": 95,
+            "transcript": [
+                {"speaker": "patient", "text": "Hi, I have a question about my upcoming appointment"},
+                {"speaker": "aria", "text": "Hi Lisa! I see you have a cleaning scheduled for today at 1pm. What's your question?"},
+                {"speaker": "patient", "text": "Will there be any X-rays? I'm a bit anxious about those"},
+                {"speaker": "aria", "text": "I completely understand, Lisa. For today's cleaning, X-rays aren't typically included unless Dr. Smith sees something that needs a closer look. If you'd prefer to skip them entirely, I can add a note to your file."},
+                {"speaker": "patient", "text": "Yes, please add that note. Thank you for understanding"},
+                {"speaker": "aria", "text": "Done! I've noted your preference. See you at 1pm, Lisa!"}
+            ],
+            "outcome": "inquiry", "created_at": (now - timedelta(hours=4)).isoformat()
+        },
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[9]["id"],
+            "patient_name": patients[9]["name"], "phone": patients[9]["phone"],
+            "direction": "outbound", "duration_secs": 0,
+            "transcript": [],
+            "outcome": "no_answer", "created_at": (now - timedelta(hours=2)).isoformat()
+        },
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[2]["id"],
+            "patient_name": patients[2]["name"], "phone": patients[2]["phone"],
+            "direction": "inbound", "duration_secs": 130,
+            "transcript": [
+                {"speaker": "patient", "text": "Good morning! Just calling to confirm my appointment today"},
+                {"speaker": "aria", "text": "Good morning, Maria! Yes, you're confirmed for today at 10:30am for your crown appointment. Everything is set!"},
+                {"speaker": "patient", "text": "Perfect. How long will it take?"},
+                {"speaker": "aria", "text": "Crown appointments typically take about 45 minutes to an hour. Dr. Smith will go over everything with you when you arrive."},
+                {"speaker": "patient", "text": "Great, see you at 10:30!"},
+                {"speaker": "aria", "text": "See you then, Maria! Have a great morning!"}
+            ],
+            "outcome": "inquiry", "created_at": (now - timedelta(hours=1)).isoformat()
+        },
+        {
+            "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": patients[3]["id"],
+            "patient_name": patients[3]["name"], "phone": patients[3]["phone"],
+            "direction": "outbound", "duration_secs": 78,
+            "transcript": [
+                {"speaker": "aria", "text": "Hi James, this is ARIA from Dr. Smith's office. I'm calling to remind you about your cleaning appointment tomorrow at 11am."},
+                {"speaker": "patient", "text": "Yes, I'll be there. Thanks for the reminder!"},
+                {"speaker": "aria", "text": "Wonderful! We'll see you tomorrow at 11am. Have a great evening, James!"}
+            ],
+            "outcome": "booked", "created_at": (now - timedelta(hours=8)).isoformat()
+        }
+    ]
+    await db.calls.insert_many(demo_calls)
+    
+    # Demo WhatsApp messages
+    demo_messages = []
+    msg_patients = [patients[0], patients[1], patients[2], patients[4], patients[7], patients[8], patients[3], patients[10]]
+    
+    # Sarah's conversation
+    p = patients[0]
+    sarah_msgs = [
+        {"direction": "outbound", "body": "Hi Sarah! This is ARIA from Dr. Smith's office. Your cleaning appointment has been confirmed for Thursday at 2pm. See you then!", "sender": "aria", "hours_ago": 3},
+        {"direction": "inbound", "body": "Thank you! Can I also get an X-ray during that visit?", "sender": "patient", "hours_ago": 2.5},
+        {"direction": "outbound", "body": "Absolutely, Sarah! I've added an X-ray to your appointment. We'll get everything taken care of in one visit.", "sender": "aria", "hours_ago": 2.4},
+        {"direction": "inbound", "body": "Perfect, thanks ARIA!", "sender": "patient", "hours_ago": 2.3},
+    ]
+    for m in sarah_msgs:
+        demo_messages.append({"id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"], "direction": m["direction"], "body": m["body"], "sender": m["sender"], "read": True, "created_at": (now - timedelta(hours=m["hours_ago"])).isoformat()})
+    
+    # Ahmed's conversation
+    p = patients[1]
+    ahmed_msgs = [
+        {"direction": "outbound", "body": "Hi Ahmed, your root canal appointment has been rescheduled to Friday at 9:30am as requested.", "sender": "aria", "hours_ago": 5},
+        {"direction": "inbound", "body": "Got it, thanks!", "sender": "patient", "hours_ago": 4.8},
+        {"direction": "outbound", "body": "Reminder: Your root canal appointment is tomorrow (Friday) at 9:30am with Dr. Smith. Please arrive 10 minutes early.", "sender": "aria", "hours_ago": 1},
+    ]
+    for m in ahmed_msgs:
+        demo_messages.append({"id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"], "direction": m["direction"], "body": m["body"], "sender": m["sender"], "read": True, "created_at": (now - timedelta(hours=m["hours_ago"])).isoformat()})
+    
+    # Maria's conversation
+    p = patients[2]
+    maria_msgs = [
+        {"direction": "outbound", "body": "Hi Maria! Reminder: You have a crown appointment today at 10:30am. See you soon!", "sender": "aria", "hours_ago": 12},
+        {"direction": "inbound", "body": "Thank you! I'll be there. How long will it take?", "sender": "patient", "hours_ago": 11},
+        {"direction": "outbound", "body": "Crown appointments typically take 45 mins to 1 hour. Dr. Smith will take great care of you!", "sender": "aria", "hours_ago": 10.9},
+        {"direction": "inbound", "body": "Great, see you at 10:30!", "sender": "patient", "hours_ago": 10.8},
+    ]
+    for m in maria_msgs:
+        demo_messages.append({"id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"], "direction": m["direction"], "body": m["body"], "sender": m["sender"], "read": True, "created_at": (now - timedelta(hours=m["hours_ago"])).isoformat()})
+    
+    # Lisa's conversation
+    p = patients[4]
+    lisa_msgs = [
+        {"direction": "outbound", "body": "Hi Lisa! Your X-ray appointment is confirmed for today at 1pm. Note: we've added a note about your preferences.", "sender": "aria", "hours_ago": 6},
+        {"direction": "inbound", "body": "Thanks ARIA. I'm a bit nervous, is there anything I should know beforehand?", "sender": "patient", "hours_ago": 5.5},
+        {"direction": "outbound", "body": "Nothing to worry about, Lisa! The appointment is very straightforward. Dr. Smith and the team are wonderful with anxious patients. You're in great hands!", "sender": "aria", "hours_ago": 5.4},
+        {"direction": "inbound", "body": "That makes me feel better. Thank you!", "sender": "patient", "hours_ago": 5.2},
+    ]
+    for m in lisa_msgs:
+        demo_messages.append({"id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"], "direction": m["direction"], "body": m["body"], "sender": m["sender"], "read": True, "created_at": (now - timedelta(hours=m["hours_ago"])).isoformat()})
+    
+    # David (new patient) conversation
+    p = patients[7]
+    david_msgs = [
+        {"direction": "outbound", "body": "Welcome to Dr. Smith's Dental Practice, David! Your consultation is booked for Thursday at 2:30pm. We look forward to meeting you!", "sender": "aria", "hours_ago": 48},
+        {"direction": "inbound", "body": "Thank you! Is there any paperwork I should fill out before?", "sender": "patient", "hours_ago": 47},
+        {"direction": "outbound", "body": "Great question! Please bring your ID and insurance card. You can arrive 15 minutes early to fill out new patient forms, or I can send them digitally if you prefer.", "sender": "aria", "hours_ago": 46.8},
+        {"direction": "inbound", "body": "Digital would be great!", "sender": "patient", "hours_ago": 46},
+        {"direction": "outbound", "body": "I've sent the new patient forms to your email at david.k@email.com. Please complete them before your visit. See you Thursday!", "sender": "aria", "hours_ago": 45.8},
+    ]
+    for m in david_msgs:
+        demo_messages.append({"id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"], "direction": m["direction"], "body": m["body"], "sender": m["sender"], "read": m["direction"] == "outbound", "created_at": (now - timedelta(hours=m["hours_ago"])).isoformat()})
+    
+    # Sofia's conversation
+    p = patients[8]
+    sofia_msgs = [
+        {"direction": "outbound", "body": "Hola Sofia! This is ARIA from Dr. Smith's office. Your whitening appointment is coming up next week. We'll send you a reminder the day before!", "sender": "aria", "hours_ago": 24},
+        {"direction": "inbound", "body": "Gracias! Can't wait!", "sender": "patient", "hours_ago": 23},
+    ]
+    for m in sofia_msgs:
+        demo_messages.append({"id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"], "direction": m["direction"], "body": m["body"], "sender": m["sender"], "read": True, "created_at": (now - timedelta(hours=m["hours_ago"])).isoformat()})
+    
+    # Robert (no-show) conversation
+    p = patients[5]
+    robert_msgs = [
+        {"direction": "outbound", "body": "Hi Robert! We missed you at your appointment today. Would you like to reschedule? We have openings next week.", "sender": "aria", "hours_ago": 6},
+        {"direction": "inbound", "body": "Sorry about that, I totally forgot. Let me check my schedule and get back to you.", "sender": "patient", "hours_ago": 4},
+        {"direction": "outbound", "body": "No problem at all, Robert! Whenever you're ready, just reply here or call us. We're happy to find a time that works for you.", "sender": "aria", "hours_ago": 3.8},
+    ]
+    for m in robert_msgs:
+        demo_messages.append({"id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": p["id"], "direction": m["direction"], "body": m["body"], "sender": m["sender"], "read": False, "created_at": (now - timedelta(hours=m["hours_ago"])).isoformat()})
+    
+    await db.messages.insert_many(demo_messages)
+    
+    # Demo activity feed
+    activities = [
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "call", "description": "Answered call from Sarah Mitchell — booked cleaning for Thursday 2pm", "patient_name": "Sarah Mitchell", "status": "done", "created_at": (now - timedelta(minutes=5)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "whatsapp", "description": "Sent appointment confirmation to Sarah Mitchell via WhatsApp", "patient_name": "Sarah Mitchell", "status": "done", "created_at": (now - timedelta(minutes=4)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "call", "description": "Answered call from Ahmed Hassan — rescheduled root canal to Friday", "patient_name": "Ahmed Hassan", "status": "done", "created_at": (now - timedelta(minutes=30)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "booking", "description": "Booked consultation for David Kim — Thursday 2:30pm (new patient)", "patient_name": "David Kim", "status": "done", "created_at": (now - timedelta(hours=2)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "whatsapp", "description": "Sent reminder to Maria Santos — crown appointment today at 10:30am", "patient_name": "Maria Santos", "status": "done", "created_at": (now - timedelta(hours=3)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "call", "description": "Called Robert Johnson — follow-up on missed appointment, no reschedule yet", "patient_name": "Robert Johnson", "status": "pending", "created_at": (now - timedelta(hours=4)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "followup", "description": "Sent no-show follow-up to Robert Johnson via WhatsApp", "patient_name": "Robert Johnson", "status": "done", "created_at": (now - timedelta(hours=4.5)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "call", "description": "Answered inquiry from Lisa Chen about X-ray concerns", "patient_name": "Lisa Chen", "status": "done", "created_at": (now - timedelta(hours=5)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "whatsapp", "description": "Sent appointment reminder to Ahmed Hassan — root canal Friday 9:30am", "patient_name": "Ahmed Hassan", "status": "done", "created_at": (now - timedelta(hours=6)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "booking", "description": "Booked extraction for Sofia Rodriguez — next week Wednesday 2pm", "patient_name": "Sofia Rodriguez", "status": "done", "created_at": (now - timedelta(hours=8)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "call", "description": "Reminder call to James Wilson — cleaning tomorrow at 11am, confirmed", "patient_name": "James Wilson", "status": "done", "created_at": (now - timedelta(hours=10)).isoformat()},
+        {"id": str(uuid.uuid4()), "practice_id": practice_id, "type": "whatsapp", "description": "Replied to Sofia Rodriguez — confirmed whitening appointment details", "patient_name": "Sofia Rodriguez", "status": "done", "created_at": (now - timedelta(hours=12)).isoformat()},
+    ]
+    await db.activity_feed.insert_many(activities)
+    
+    logger.info(f"Demo data seeded: {len(patients)} patients, {len(appointments)} appointments, {len(demo_calls)} calls, {len(demo_messages)} messages")
+
+# --- STARTUP ---
+@app.on_event("startup")
+async def startup():
+    # Create indexes
+    await db.users.create_index("email", unique=True)
+    await db.patients.create_index([("practice_id", 1), ("name", 1)])
+    await db.appointments.create_index([("practice_id", 1), ("date", 1)])
+    await db.calls.create_index([("practice_id", 1), ("created_at", -1)])
+    await db.messages.create_index([("practice_id", 1), ("patient_id", 1)])
+    await db.activity_feed.create_index([("practice_id", 1), ("created_at", -1)])
+    
+    # Seed admin
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@dentistai.com")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    practice_id = "demo-practice-001"
+    
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        hashed = hash_password(admin_password)
+        await db.users.insert_one({
+            "email": admin_email, "password_hash": hashed, "name": "Dr. Smith",
+            "role": "admin", "practice_id": practice_id,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        # Create practice
+        await db.practices.insert_one({
+            "practice_id": practice_id, "name": "SmileCare Dental",
+            "doctor_name": "Dr. Smith", "phone": "+1-555-0100",
+            "address": "123 Dental Ave, Suite 100, Beverly Hills, CA 90210",
+            "office_hours": {"mon": "9:00-17:00", "tue": "9:00-17:00", "wed": "9:00-17:00", "thu": "9:00-17:00", "fri": "9:00-15:00", "sat": "closed", "sun": "closed"},
+            "aria_voice": "professional", "aria_language": "English", "aria_tone": "warm",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        logger.info(f"Admin user created: {admin_email}")
+    elif not verify_password(admin_password, existing["password_hash"]):
+        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+    
+    # Seed demo data
+    await seed_demo_data(practice_id)
+    
+    # Write test credentials
+    os.makedirs("/app/memory", exist_ok=True)
+    with open("/app/memory/test_credentials.md", "w") as f:
+        f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n- Practice: SmileCare Dental\n\n## Auth Endpoints\n- POST /api/auth/login\n- POST /api/auth/register\n- POST /api/auth/logout\n- GET /api/auth/me\n")
+    logger.info("Test credentials written to /app/memory/test_credentials.md")
+
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000"), "*"],
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
