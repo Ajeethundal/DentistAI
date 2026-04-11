@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useApi } from '@/context/AuthContext';
+import { useApi, useAuth } from '@/context/AuthContext';
 import AriaChat from '@/components/AriaChat';
-import { Phone, Calendar, MessageSquare, TrendingDown, TrendingUp, Clock, Activity } from 'lucide-react';
+import { Phone, Calendar, MessageSquare, TrendingDown, TrendingUp, Clock, Activity, Wifi } from 'lucide-react';
 
 function AnimatedNumber({ value, duration = 800 }) {
   const [display, setDisplay] = useState(0);
@@ -48,9 +48,11 @@ function timeAgo(dateStr) {
 
 export default function DashboardPage() {
   const api = useApi();
+  const { user } = useAuth();
   const [stats, setStats] = useState(null);
   const [feed, setFeed] = useState([]);
   const [todaySchedule, setTodaySchedule] = useState([]);
+  const [wsConnected, setWsConnected] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -67,6 +69,41 @@ export default function DashboardPage() {
     };
     load();
   }, []);
+
+  // WebSocket connection for real-time updates
+  useEffect(() => {
+    const practiceId = user?.practice_id;
+    if (!practiceId) return;
+
+    const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
+    const wsUrl = backendUrl.replace('https://', 'wss://').replace('http://', 'ws://') + `/ws/${practiceId}`;
+    
+    let ws;
+    let reconnectTimer;
+    
+    const connect = () => {
+      try {
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => { setWsConnected(true); };
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'activity' && msg.data) {
+              setFeed(prev => [msg.data, ...prev].slice(0, 20));
+            }
+          } catch {}
+        };
+        ws.onclose = () => {
+          setWsConnected(false);
+          reconnectTimer = setTimeout(connect, 5000);
+        };
+        ws.onerror = () => { ws.close(); };
+      } catch {}
+    };
+    
+    connect();
+    return () => { if (ws) ws.close(); clearTimeout(reconnectTimer); };
+  }, [user?.practice_id]);
 
   const statCards = stats ? [
     { label: 'Calls Today', value: stats.calls_today, change: stats.calls_today - stats.calls_yesterday, icon: Phone, color: '#00D4AA' },
@@ -120,7 +157,10 @@ export default function DashboardPage() {
           <div className="bg-[#111118] border border-[rgba(255,255,255,0.07)] rounded-xl">
             <div className="flex items-center justify-between p-4 border-b border-[rgba(255,255,255,0.07)]">
               <h2 className="text-sm font-semibold text-[#F0F0F5] font-['Outfit']">ARIA Activity Feed</h2>
-              <span className="text-[10px] text-[#8888A0]">Real-time</span>
+              <div className="flex items-center gap-2">
+                {wsConnected && <span className="flex items-center gap-1 text-[10px] text-[#00D4AA]"><Wifi size={10} /> Live</span>}
+                <span className="text-[10px] text-[#8888A0]">Real-time</span>
+              </div>
             </div>
             <div className="p-4 space-y-3 max-h-[400px] overflow-y-auto chat-scroll" data-testid="activity-feed">
               {feed.map((item, i) => {

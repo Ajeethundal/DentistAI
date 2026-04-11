@@ -4,19 +4,20 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import bcrypt
-import jwt
+import jwt as pyjwt
 import uuid
 import json
 import asyncio
 from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from bson import ObjectId
 
 # MongoDB connection
@@ -45,11 +46,11 @@ def get_jwt_secret() -> str:
 
 def create_access_token(user_id: str, email: str) -> str:
     payload = {"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(hours=24), "type": "access"}
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    return pyjwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 def create_refresh_token(user_id: str) -> str:
     payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    return pyjwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 async def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
@@ -60,7 +61,7 @@ async def get_current_user(request: Request) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        payload = pyjwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Invalid token type")
         user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
@@ -69,9 +70,9 @@ async def get_current_user(request: Request) -> dict:
         user["_id"] = str(user["_id"])
         user.pop("password_hash", None)
         return user
-    except jwt.ExpiredSignatureError:
+    except pyjwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
+    except pyjwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # --- Pydantic Models ---
@@ -137,6 +138,53 @@ class FollowUpAction(BaseModel):
     action: str  # call, whatsapp, dismiss
     patient_id: str
     appointment_id: Optional[str] = None
+
+class StripeCheckoutRequest(BaseModel):
+    plan: str  # starter, professional, enterprise
+    origin_url: str
+
+class RetellCallRequest(BaseModel):
+    to_number: str
+    patient_name: Optional[str] = ""
+    objective: Optional[str] = "follow-up"
+
+class TwilioMessageRequest(BaseModel):
+    to_number: str
+    message: str
+
+# --- WebSocket Manager ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+    
+    async def connect(self, websocket: WebSocket, practice_id: str):
+        await websocket.accept()
+        if practice_id not in self.active_connections:
+            self.active_connections[practice_id] = []
+        self.active_connections[practice_id].append(websocket)
+        logger.info(f"WebSocket connected for practice {practice_id}")
+    
+    def disconnect(self, websocket: WebSocket, practice_id: str):
+        if practice_id in self.active_connections:
+            self.active_connections[practice_id] = [c for c in self.active_connections[practice_id] if c != websocket]
+        logger.info(f"WebSocket disconnected for practice {practice_id}")
+    
+    async def broadcast(self, practice_id: str, message: dict):
+        if practice_id in self.active_connections:
+            dead = []
+            for connection in self.active_connections[practice_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    dead.append(connection)
+            for d in dead:
+                self.active_connections[practice_id].remove(d)
+
+ws_manager = ConnectionManager()
+
+async def broadcast_activity(practice_id: str, activity: dict):
+    """Broadcast activity to all connected WebSocket clients"""
+    await ws_manager.broadcast(practice_id, {"type": "activity", "data": activity})
 
 # --- AUTH ROUTES ---
 @api_router.post("/auth/login")
@@ -601,13 +649,584 @@ async def update_settings(req: SettingsUpdate, user: dict = Depends(get_current_
 async def webhook_retell(request: Request):
     body = await request.json()
     logger.info(f"Retell webhook received: {json.dumps(body)[:200]}")
+    
+    # Process call ended event
+    call_data = body.get("call", body)
+    call_id = call_data.get("call_id", str(uuid.uuid4()))
+    transcript = call_data.get("transcript", "")
+    from_number = call_data.get("from_number", "")
+    
+    if transcript:
+        # Find patient by phone
+        patient = await db.patients.find_one({"phone": from_number}, {"_id": 0}) if from_number else None
+        
+        # Store call record
+        call_record = {
+            "id": call_id, "practice_id": "demo-practice-001",
+            "patient_id": patient["id"] if patient else "",
+            "patient_name": patient["name"] if patient else f"Unknown — {from_number}",
+            "phone": from_number, "direction": call_data.get("direction", "inbound"),
+            "duration_secs": int(call_data.get("duration_ms", 0) / 1000),
+            "transcript": [{"speaker": "system", "text": transcript}],
+            "outcome": "booked" if "appointment" in transcript.lower() else "inquiry",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.calls.insert_one(call_record)
+        
+        # Broadcast to WebSocket
+        activity = {
+            "id": str(uuid.uuid4()), "practice_id": "demo-practice-001",
+            "type": "call", "description": f"Call processed: {from_number}",
+            "patient_name": patient["name"] if patient else "Unknown", "status": "done",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.activity_feed.insert_one(activity)
+        await broadcast_activity("demo-practice-001", activity)
+    
     return {"status": "received"}
 
 @api_router.post("/webhooks/whatsapp")
 async def webhook_whatsapp(request: Request):
-    body = await request.json()
-    logger.info(f"WhatsApp webhook received: {json.dumps(body)[:200]}")
+    """Handle incoming WhatsApp messages from Twilio"""
+    try:
+        form_data = await request.form()
+        params = dict(form_data)
+    except Exception:
+        body = await request.json()
+        params = body
+    
+    message_body = params.get("Body", params.get("body", ""))
+    from_number = params.get("From", params.get("from", "")).replace("whatsapp:", "")
+    
+    if from_number and message_body:
+        # Find patient by phone
+        patient = await db.patients.find_one({"phone": from_number}, {"_id": 0})
+        if patient:
+            # Store incoming message
+            msg = {
+                "id": str(uuid.uuid4()), "practice_id": patient.get("practice_id", "demo-practice-001"),
+                "patient_id": patient["id"], "direction": "inbound",
+                "body": message_body, "sender": "patient", "read": False,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.messages.insert_one(msg)
+            
+            # Broadcast to WebSocket
+            activity = {
+                "id": str(uuid.uuid4()), "practice_id": patient.get("practice_id", "demo-practice-001"),
+                "type": "whatsapp", "description": f"WhatsApp from {patient['name']}: {message_body[:50]}",
+                "patient_name": patient["name"], "status": "done",
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.activity_feed.insert_one(activity)
+            await broadcast_activity(patient.get("practice_id", "demo-practice-001"), activity)
+    
+    logger.info(f"WhatsApp webhook: from={from_number}, body={message_body[:50]}")
     return {"status": "received"}
+
+# --- WEBSOCKET ---
+@app.websocket("/ws/{practice_id}")
+async def websocket_endpoint(websocket: WebSocket, practice_id: str):
+    """WebSocket for real-time activity feed updates"""
+    await ws_manager.connect(websocket, practice_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Client can send pings or requests
+            if data == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket, practice_id)
+
+# --- RETELL AI INTEGRATION ---
+@api_router.post("/retell/call")
+async def make_retell_call(req: RetellCallRequest, user: dict = Depends(get_current_user)):
+    """Initiate an outbound call via Retell AI"""
+    retell_key = os.environ.get("RETELL_API_KEY", "")
+    if not retell_key:
+        raise HTTPException(status_code=400, detail="Retell AI not configured. Add RETELL_API_KEY in settings.")
+    
+    try:
+        from retell import Retell
+        retell_client = Retell(api_key=retell_key)
+        
+        # List agents to find configured one
+        agents = retell_client.agent.list()
+        if not agents:
+            return {"status": "error", "message": "No Retell AI agents configured. Create an agent in your Retell dashboard first."}
+        
+        agent_id = agents[0].agent_id
+        
+        # Get practice phone number
+        practice = await db.practices.find_one({"practice_id": user.get("practice_id", "")}, {"_id": 0})
+        from_number = practice.get("retell_phone", "") if practice else ""
+        
+        if not from_number:
+            return {"status": "demo", "message": f"Call queued to {req.to_number} for {req.patient_name}. Configure a Retell phone number in Settings to make real calls.", "agent_id": agent_id}
+        
+        call_response = retell_client.call.createPhoneCall(
+            from_number=from_number,
+            to_number=req.to_number,
+            override_agent_id=agent_id,
+            retell_llm_dynamic_variables={"patient_name": req.patient_name or "Patient", "objective": req.objective or "follow-up"}
+        )
+        
+        # Log activity
+        activity = {
+            "id": str(uuid.uuid4()), "practice_id": user.get("practice_id", ""),
+            "type": "call", "description": f"Outbound call to {req.patient_name or req.to_number}",
+            "patient_name": req.patient_name, "status": "done",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.activity_feed.insert_one(activity)
+        await broadcast_activity(user.get("practice_id", ""), activity)
+        
+        return {"status": "success", "call_id": call_response.call_id, "message": f"Call initiated to {req.to_number}"}
+    except Exception as e:
+        logger.error(f"Retell call error: {e}")
+        return {"status": "error", "message": str(e)}
+
+@api_router.get("/retell/status")
+async def retell_status(user: dict = Depends(get_current_user)):
+    """Check Retell AI connection status"""
+    retell_key = os.environ.get("RETELL_API_KEY", "")
+    if not retell_key:
+        return {"connected": False, "message": "No API key configured"}
+    try:
+        from retell import Retell
+        retell_client = Retell(api_key=retell_key)
+        agents = retell_client.agent.list()
+        return {"connected": True, "agents": len(agents), "message": f"Connected with {len(agents)} agent(s)"}
+    except Exception as e:
+        return {"connected": False, "message": str(e)}
+
+# --- TWILIO WHATSAPP INTEGRATION ---
+@api_router.post("/twilio/send")
+async def send_twilio_message(req: TwilioMessageRequest, user: dict = Depends(get_current_user)):
+    """Send a WhatsApp message via Twilio"""
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    api_key = os.environ.get("TWILIO_API_KEY", "")
+    api_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
+    from_number = os.environ.get("TWILIO_WHATSAPP_FROM", "")
+    
+    if not account_sid or not api_key:
+        # Demo mode - simulate sending
+        practice_id = user.get("practice_id", "")
+        patient = await db.patients.find_one({"phone": req.to_number}, {"_id": 0})
+        if patient:
+            msg = {
+                "id": str(uuid.uuid4()), "practice_id": practice_id,
+                "patient_id": patient["id"], "direction": "outbound",
+                "body": req.message, "sender": "doctor", "read": True,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.messages.insert_one(msg)
+        return {"status": "demo", "message": "Twilio not fully configured. Message saved locally. Add TWILIO_ACCOUNT_SID in settings to send real WhatsApp messages."}
+    
+    try:
+        from twilio.rest import Client
+        twilio_client = Client(account_sid, api_key, api_secret)
+        
+        to_whatsapp = f"whatsapp:{req.to_number}" if not req.to_number.startswith("whatsapp:") else req.to_number
+        from_whatsapp = f"whatsapp:{from_number}" if not from_number.startswith("whatsapp:") else from_number
+        
+        message = twilio_client.messages.create(
+            body=req.message,
+            from_=from_whatsapp,
+            to=to_whatsapp
+        )
+        
+        # Store message
+        practice_id = user.get("practice_id", "")
+        patient = await db.patients.find_one({"phone": req.to_number}, {"_id": 0})
+        if patient:
+            msg_record = {
+                "id": str(uuid.uuid4()), "practice_id": practice_id,
+                "patient_id": patient["id"], "direction": "outbound",
+                "body": req.message, "sender": "doctor", "read": True,
+                "twilio_sid": message.sid, "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.messages.insert_one(msg_record)
+        
+        return {"status": "success", "sid": message.sid, "message": "WhatsApp message sent"}
+    except Exception as e:
+        logger.error(f"Twilio error: {e}")
+        return {"status": "error", "message": str(e)}
+
+@api_router.get("/twilio/status")
+async def twilio_status(user: dict = Depends(get_current_user)):
+    """Check Twilio connection status"""
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    api_key = os.environ.get("TWILIO_API_KEY", "")
+    if not account_sid:
+        return {"connected": False, "message": "Account SID not configured. Add TWILIO_ACCOUNT_SID in settings."}
+    if not api_key:
+        return {"connected": False, "message": "API key not configured"}
+    try:
+        from twilio.rest import Client
+        api_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
+        twilio_client = Client(account_sid, api_key, api_secret)
+        account = twilio_client.api.v2010.accounts(account_sid).fetch()
+        return {"connected": True, "message": f"Connected: {account.friendly_name}"}
+    except Exception as e:
+        return {"connected": False, "message": str(e)}
+
+# --- GOOGLE CALENDAR INTEGRATION ---
+@api_router.get("/google/auth-url")
+async def get_google_auth_url(user: dict = Depends(get_current_user)):
+    """Get Google OAuth authorization URL"""
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "")
+    
+    if not client_id:
+        return {"url": None, "message": "Google OAuth not configured. Add GOOGLE_CLIENT_ID in settings."}
+    
+    scopes = "https://www.googleapis.com/auth/calendar"
+    auth_url = (
+        f"https://accounts.google.com/o/oauth2/v2/auth?"
+        f"client_id={client_id}&redirect_uri={redirect_uri}"
+        f"&response_type=code&scope={scopes}"
+        f"&access_type=offline&prompt=consent"
+        f"&state={user.get('practice_id', '')}"
+    )
+    return {"url": auth_url, "message": "Redirect user to this URL to authorize Google Calendar access"}
+
+@api_router.get("/google/callback")
+async def google_callback(code: str = "", state: str = "", error: str = ""):
+    """Handle Google OAuth callback"""
+    if error:
+        frontend_url = os.environ.get("FRONTEND_URL", "")
+        return RedirectResponse(f"{frontend_url}/settings?google_error={error}")
+    
+    if not code:
+        raise HTTPException(status_code=400, detail="No authorization code received")
+    
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+    redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "")
+    
+    try:
+        import httpx
+        # Exchange code for tokens
+        async with httpx.AsyncClient() as http_client:
+            token_response = await http_client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code"
+                }
+            )
+            tokens = token_response.json()
+        
+        if "error" in tokens:
+            frontend_url = os.environ.get("FRONTEND_URL", "")
+            return RedirectResponse(f"{frontend_url}/settings?google_error={tokens['error']}")
+        
+        # Store tokens for the practice
+        practice_id = state or "demo-practice-001"
+        await db.practices.update_one(
+            {"practice_id": practice_id},
+            {"$set": {
+                "google_tokens": {
+                    "access_token": tokens.get("access_token"),
+                    "refresh_token": tokens.get("refresh_token"),
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=tokens.get("expires_in", 3600))).isoformat()
+                },
+                "google_connected": True
+            }}
+        )
+        
+        logger.info(f"Google Calendar connected for practice {practice_id}")
+        frontend_url = os.environ.get("FRONTEND_URL", "")
+        return RedirectResponse(f"{frontend_url}/settings?google_connected=true")
+    
+    except Exception as e:
+        logger.error(f"Google OAuth error: {e}")
+        frontend_url = os.environ.get("FRONTEND_URL", "")
+        return RedirectResponse(f"{frontend_url}/settings?google_error={str(e)}")
+
+@api_router.get("/google/status")
+async def google_calendar_status(user: dict = Depends(get_current_user)):
+    """Check Google Calendar connection status"""
+    practice_id = user.get("practice_id", "")
+    practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    if not practice:
+        return {"connected": False, "message": "Practice not found"}
+    
+    if practice.get("google_connected"):
+        return {"connected": True, "message": "Google Calendar connected"}
+    return {"connected": False, "message": "Not connected. Click 'Connect' to authorize."}
+
+@api_router.get("/google/calendars")
+async def list_google_calendars(user: dict = Depends(get_current_user)):
+    """List Google Calendars for the connected account"""
+    practice_id = user.get("practice_id", "")
+    practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    
+    if not practice or not practice.get("google_tokens"):
+        return {"calendars": [], "message": "Google Calendar not connected"}
+    
+    tokens = practice["google_tokens"]
+    try:
+        import httpx
+        async with httpx.AsyncClient() as http_client:
+            # Refresh token if needed
+            access_token = tokens.get("access_token")
+            
+            response = await http_client.get(
+                "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            
+            if response.status_code == 401 and tokens.get("refresh_token"):
+                # Refresh the token
+                refresh_resp = await http_client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "refresh_token": tokens["refresh_token"],
+                        "client_id": os.environ.get("GOOGLE_CLIENT_ID"),
+                        "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET"),
+                        "grant_type": "refresh_token"
+                    }
+                )
+                new_tokens = refresh_resp.json()
+                access_token = new_tokens.get("access_token", access_token)
+                await db.practices.update_one(
+                    {"practice_id": practice_id},
+                    {"$set": {"google_tokens.access_token": access_token}}
+                )
+                response = await http_client.get(
+                    "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+            
+            data = response.json()
+            calendars = [{"id": c["id"], "summary": c.get("summary", "")} for c in data.get("items", [])]
+            return {"calendars": calendars}
+    except Exception as e:
+        return {"calendars": [], "message": str(e)}
+
+@api_router.post("/google/sync")
+async def sync_google_calendar(user: dict = Depends(get_current_user)):
+    """Sync appointments with Google Calendar"""
+    practice_id = user.get("practice_id", "")
+    practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    
+    if not practice or not practice.get("google_tokens"):
+        return {"status": "error", "message": "Google Calendar not connected"}
+    
+    tokens = practice["google_tokens"]
+    access_token = tokens.get("access_token")
+    
+    try:
+        import httpx
+        async with httpx.AsyncClient() as http_client:
+            # Get upcoming events
+            now = datetime.now(timezone.utc).isoformat()
+            response = await http_client.get(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                params={"timeMin": now, "maxResults": 50, "singleEvents": True, "orderBy": "startTime"},
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            
+            if response.status_code == 200:
+                events = response.json().get("items", [])
+                synced = 0
+                for event in events:
+                    start = event.get("start", {}).get("dateTime", event.get("start", {}).get("date", ""))
+                    if start:
+                        # Check if already exists
+                        existing = await db.appointments.find_one({"google_event_id": event["id"]})
+                        if not existing:
+                            appt = {
+                                "id": str(uuid.uuid4()), "practice_id": practice_id,
+                                "patient_id": "", "patient_name": event.get("summary", "Google Event"),
+                                "patient_phone": "", "date": start[:10], "time": start[11:16] if "T" in start else "09:00",
+                                "duration_mins": 30, "treatment_type": "Synced from Google",
+                                "status": "confirmed", "notes": event.get("description", ""),
+                                "google_event_id": event["id"], "created_by": "google",
+                                "created_at": datetime.now(timezone.utc).isoformat()
+                            }
+                            await db.appointments.insert_one(appt)
+                            synced += 1
+                
+                await db.practices.update_one(
+                    {"practice_id": practice_id},
+                    {"$set": {"google_last_sync": datetime.now(timezone.utc).isoformat()}}
+                )
+                return {"status": "success", "synced": synced, "total_events": len(events)}
+            else:
+                return {"status": "error", "message": f"Google API error: {response.status_code}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- STRIPE BILLING ---
+BILLING_PLANS = {
+    "starter": {"name": "Starter", "price": 49.00, "features": ["100 calls/month", "500 WhatsApp messages", "1 doctor"]},
+    "professional": {"name": "Professional", "price": 149.00, "features": ["500 calls/month", "2000 WhatsApp messages", "3 doctors", "Priority support"]},
+    "enterprise": {"name": "Enterprise", "price": 399.00, "features": ["Unlimited calls", "Unlimited messages", "Unlimited doctors", "24/7 support", "Custom integrations"]}
+}
+
+@api_router.get("/billing/plans")
+async def get_billing_plans(user: dict = Depends(get_current_user)):
+    """Get available billing plans"""
+    return {"plans": BILLING_PLANS}
+
+@api_router.post("/billing/checkout")
+async def create_checkout_session(req: StripeCheckoutRequest, request: Request, user: dict = Depends(get_current_user)):
+    """Create a Stripe checkout session"""
+    stripe_key = os.environ.get("STRIPE_API_KEY", "")
+    if not stripe_key:
+        raise HTTPException(status_code=400, detail="Stripe not configured")
+    
+    plan = BILLING_PLANS.get(req.plan)
+    if not plan:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+    
+    try:
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionRequest
+        
+        host_url = req.origin_url.rstrip("/")
+        webhook_url = str(request.base_url).rstrip("/") + "/api/webhook/stripe"
+        stripe_checkout = StripeCheckout(api_key=stripe_key, webhook_url=webhook_url)
+        
+        success_url = f"{host_url}/settings?session_id={{CHECKOUT_SESSION_ID}}&plan={req.plan}"
+        cancel_url = f"{host_url}/settings"
+        
+        checkout_req = CheckoutSessionRequest(
+            amount=plan["price"],
+            currency="usd",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "practice_id": user.get("practice_id", ""),
+                "user_id": user.get("_id", ""),
+                "plan": req.plan,
+                "plan_name": plan["name"]
+            }
+        )
+        
+        session = await stripe_checkout.create_checkout_session(checkout_req)
+        
+        # Create payment transaction record
+        await db.payment_transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "session_id": session.session_id,
+            "practice_id": user.get("practice_id", ""),
+            "user_email": user.get("email", ""),
+            "plan": req.plan,
+            "amount": plan["price"],
+            "currency": "usd",
+            "payment_status": "initiated",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        
+        return {"url": session.url, "session_id": session.session_id}
+    except Exception as e:
+        logger.error(f"Stripe checkout error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/billing/status/{session_id}")
+async def get_checkout_status(session_id: str, user: dict = Depends(get_current_user)):
+    """Get checkout session status"""
+    stripe_key = os.environ.get("STRIPE_API_KEY", "")
+    if not stripe_key:
+        raise HTTPException(status_code=400, detail="Stripe not configured")
+    
+    try:
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout
+        
+        host_url = os.environ.get("FRONTEND_URL", "")
+        webhook_url = host_url + "/api/webhook/stripe"
+        stripe_checkout = StripeCheckout(api_key=stripe_key, webhook_url=webhook_url)
+        
+        status = await stripe_checkout.get_checkout_status(session_id)
+        
+        # Update payment transaction
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {"$set": {"payment_status": status.payment_status, "status": status.status}}
+        )
+        
+        # If paid, update practice subscription
+        if status.payment_status == "paid":
+            transaction = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+            if transaction and transaction.get("payment_status") != "completed":
+                await db.payment_transactions.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"payment_status": "completed"}}
+                )
+                await db.practices.update_one(
+                    {"practice_id": user.get("practice_id", "")},
+                    {"$set": {
+                        "subscription_plan": transaction.get("plan", "starter"),
+                        "subscription_status": "active",
+                        "subscription_updated_at": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+        
+        return {
+            "status": status.status,
+            "payment_status": status.payment_status,
+            "amount_total": status.amount_total,
+            "currency": status.currency
+        }
+    except Exception as e:
+        logger.error(f"Stripe status error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """Handle Stripe payment webhooks"""
+    try:
+        body = await request.body()
+        stripe_key = os.environ.get("STRIPE_API_KEY", "")
+        signature = request.headers.get("Stripe-Signature", "")
+        
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout
+        host_url = os.environ.get("FRONTEND_URL", "")
+        webhook_url = host_url + "/api/webhook/stripe"
+        stripe_checkout = StripeCheckout(api_key=stripe_key, webhook_url=webhook_url)
+        
+        webhook_response = await stripe_checkout.handle_webhook(body, signature)
+        
+        if webhook_response.payment_status == "paid":
+            await db.payment_transactions.update_one(
+                {"session_id": webhook_response.session_id},
+                {"$set": {"payment_status": "completed", "event_type": webhook_response.event_type}}
+            )
+        
+        logger.info(f"Stripe webhook: {webhook_response.event_type} for {webhook_response.session_id}")
+        return {"status": "received"}
+    except Exception as e:
+        logger.error(f"Stripe webhook error: {e}")
+        return {"status": "error"}
+
+# --- INTEGRATION STATUS ---
+@api_router.get("/integrations/status")
+async def get_integrations_status(user: dict = Depends(get_current_user)):
+    """Get status of all integrations"""
+    practice_id = user.get("practice_id", "")
+    practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    
+    retell_key = os.environ.get("RETELL_API_KEY", "")
+    twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    google_connected = practice.get("google_connected", False) if practice else False
+    stripe_key = os.environ.get("STRIPE_API_KEY", "")
+    
+    return {
+        "retell": {"configured": bool(retell_key), "key_preview": f"...{retell_key[-8:]}" if retell_key else ""},
+        "twilio": {"configured": bool(twilio_sid), "key_preview": f"...{twilio_sid[-8:]}" if twilio_sid else ""},
+        "google_calendar": {"connected": google_connected, "last_sync": practice.get("google_last_sync", "") if practice else ""},
+        "stripe": {"configured": bool(stripe_key)},
+        "subscription": {
+            "plan": practice.get("subscription_plan", "free") if practice else "free",
+            "status": practice.get("subscription_status", "inactive") if practice else "inactive"
+        }
+    }
 
 # --- DEMO DATA SEEDING ---
 async def seed_demo_data(practice_id: str):
