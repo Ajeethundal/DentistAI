@@ -1,0 +1,101 @@
+{
+  "project_name": "DentistAI",
+  "theme": "dark",
+  "archetype": "4_Swiss_High_Contrast_Dark",
+  "mood": "Dark premium SaaS, clean, fast, trustworthy, highly professional. Linear.app style combined with clinical trust. Generous whitespace, micro-animations, glass-morphism.",
+  "colors": {
+    "background_primary": "#0A0A0F",
+    "surface_card": "#111118",
+    "border_subtle": "rgba(255, 255, 255, 0.07)",
+    "accent_primary": "#6C63FF",
+    "accent_secondary": "#00D4AA",
+    "text_primary": "#F0F0F5",
+    "text_secondary": "#8888A0",
+    "danger": "#FF5B6A",
+    "warning": "#FFB347",
+    "aria_bubbles": "rgba(108, 99, 255, 0.15)",
+    "glass_bg": "rgba(17, 17, 24, 0.6)"
+  },
+  "typography": {
+    "font_family_heading": "Outfit, sans-serif",
+    "font_family_body": "Work Sans, sans-serif",
+    "font_family_mono": "JetBrains Mono, monospace",
+    "h1": "text-4xl sm:text-5xl font-light tracking-tight",
+    "h2": "text-2xl sm:text-3xl font-medium tracking-tight",
+    "h3": "text-xl sm:text-2xl font-medium",
+    "body": "text-base leading-relaxed text-[#F0F0F5]",
+    "caption": "text-sm text-[#8888A0] uppercase tracking-wider",
+    "note": "Inter is banned. Headings use Outfit for a clean tech aesthetic, body uses Work Sans for readability."
+  },
+  "surfaces": {
+    "cards": {
+      "background": "bg-[#111118]",
+      "border": "border border-[rgba(255,255,255,0.07)]",
+      "radius": "rounded-xl",
+      "shadow": "shadow-none",
+      "hover": "hover:-translate-y-1 hover:border-[#6C63FF]/30 transition-all duration-300"
+    },
+    "glass": {
+      "background": "bg-[#111118]/70",
+      "blur": "backdrop-blur-xl",
+      "border": "border border-[rgba(255,255,255,0.1)]",
+      "usage": "Sticky headers, ARIA chat panel, detail drawers, modals"
+    }
+  },
+  "layout_and_spacing": {
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+    "sidebar": "w-64 border-r border-[rgba(255,255,255,0.07)] bg-[#0A0A0F] transition-all duration-300",
+    "padding_generous": "p-6 sm:p-8",
+    "alignment": "Strict geometric alignment, left-aligned content for scanning, negative space prioritized."
+  },
+  "motion": {
+    "aria_orb": {
+      "pulse": "animate-pulse shadow-[0_0_20px_rgba(108,99,255,0.5)]",
+      "breathing": "scale(1.0) to scale(1.05) infinite alternate (use CSS keyframes)",
+      "action_ripple": "ring-4 ring-[#00D4AA]/30 transition-all duration-300"
+    },
+    "transitions": "transition-all duration-200 ease-in-out",
+    "numbers_animate": "framer-motion counter animation on value change for stats"
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#6C63FF] text-white hover:bg-[#6C63FF]/90 rounded-lg px-4 py-2 font-medium transition-all shadow-[0_0_15px_rgba(108,99,255,0.3)] hover:shadow-[0_0_25px_rgba(108,99,255,0.5)]",
+      "secondary": "bg-[#111118] text-[#F0F0F5] border border-[rgba(255,255,255,0.07)] hover:bg-[rgba(255,255,255,0.05)] rounded-lg px-4 py-2 transition-all",
+      "ghost": "text-[#8888A0] hover:text-[#F0F0F5] hover:bg-[rgba(255,255,255,0.05)] rounded-lg px-4 py-2 transition-all",
+      "danger": "bg-[#FF5B6A]/10 text-[#FF5B6A] hover:bg-[#FF5B6A]/20 rounded-lg px-4 py-2 transition-all"
+    },
+    "inputs": {
+      "base": "bg-[#0A0A0F] border border-[rgba(255,255,255,0.07)] text-[#F0F0F5] rounded-lg focus:border-[#6C63FF] focus:ring-1 focus:ring-[#6C63FF] transition-all px-3 py-2"
+    },
+    "aria_chat": {
+      "user_bubble": "bg-[#111118] border border-[rgba(255,255,255,0.07)] text-[#F0F0F5] rounded-2xl rounded-tr-sm p-4 text-sm",
+      "aria_bubble": "bg-[#6C63FF]/15 border border-[#6C63FF]/30 text-[#F0F0F5] rounded-2xl rounded-tl-sm p-4 backdrop-blur-sm text-sm"
+    },
+    "shadcn_overrides": "Do not use standard shadcn grey colors. Override all border, background, and ring utility classes to match the colors defined above. Use rounded-xl for cards and rounded-lg for interactive elements. Ensure JS/JSX files are used."
+  },
+  "media": {
+    "aria_orb_placeholder": "https://images.unsplash.com/photo-1680055195723-cf5b8fab9975?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MTJ8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMDNkJTIwdmlvbGV0JTIwb3JifGVufDB8fHx8MTc3NTkyODMyNnww&ixlib=rb-4.1.0&q=85",
+    "login_background": "https://images.unsplash.com/photo-1770744511629-5b5329482968?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzN8MHwxfHNlYXJjaHwxfHxkYXJrJTIwbW9kZXJuJTIwYXJjaGl0ZWN0dXJlJTIwZW1wdHklMjBzcGFjZXxlbnwwfHx8fDE3NzU5MjgzMjZ8MA&ixlib=rb-4.1.0&q=85",
+    "patient_avatars": [
+      "https://images.unsplash.com/photo-1633625510483-c177f4308f33?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MDV8MHwxfHNlYXJjaHwxfHxwYXRpZW50JTIwcG9ydHJhaXQlMjBoZWFkc2hvdHxlbnwwfHx8fDE3NzU5MjgzMjZ8MA&ixlib=rb-4.1.0&q=85",
+      "https://images.unsplash.com/photo-1609371497456-3a55a205d5eb?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MDV8MHwxfHNlYXJjaHwyfHxwYXRpZW50JTIwcG9ydHJhaXQlMjBoZWFkc2hvdHxlbnwwfHx8fDE3NzU5MjgzMjZ8MA&ixlib=rb-4.1.0&q=85",
+      "https://images.unsplash.com/photo-1758782213287-0120f0c8f82d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MDV8MHwxfHNlYXJjaHwzfHxwYXRpZW50JTIwcG9ydHJhaXQlMjBoZWFkc2hvdHxlbnwwfHx8fDE3NzU5MjgzMjZ8MA&ixlib=rb-4.1.0&q=85",
+      "https://images.unsplash.com/photo-1571756978657-e7db0b92f7d1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MDV8MHwxfHNlYXJjaHw0fHxwYXRpZW50JTIwcG9ydHJhaXQlMjBoZWFkc2hvdHxlbnwwfHx8fDE3NzU5MjgzMjZ8MA&ixlib=rb-4.1.0&q=85"
+    ],
+    "team_avatars": [
+      "https://images.unsplash.com/photo-1706565029402-7a3f25e22853?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzZ8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBkaXZlcnNlJTIwcGVvcGxlJTIwcG9ydHJhaXRzfGVufDB8fHx8MTc3NTkyODMxN3ww&ixlib=rb-4.1.0&q=85",
+      "https://images.unsplash.com/photo-1706565029674-cb233ea977e8?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzZ8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBkaXZlcnNlJTIwcGVvcGxlJTIwcG9ydHJhaXRzfGVufDB8fHx8MTc3NTkyODMxN3ww&ixlib=rb-4.1.0&q=85"
+    ]
+  },
+  "specific_page_instructions": {
+    "dashboard": "Bento grid mode. Feature ARIA as a fixed/floating panel on the right or bottom. Use glassmorphism for ARIA's container to overlay on the grid. Dashboard stats must use animated numbers (e.g., framer-motion).",
+    "calendar": "Strict grid, minimal borders. Active/current day marked with Accent 2 (#00D4AA). Appointment blocks use solid colors with 15% opacity and solid left borders.",
+    "whatsapp_inbox": "Three-pane layout (sidebar, chat list, active chat). Use ARIA's violet bubbles for AI responses and dark gray for user/patient.",
+    "patients_table": "Dense control room grid. Generous row padding (py-4). Hover state on rows changes background slightly. 'Detail Drawer' uses glassmorphism backdrop.",
+    "login": "Use the dark modern architecture image as background with a heavy vignette/overlay (bg-[#0A0A0F]/80). Form is a central glassmorphic card."
+  },
+  "accessibility_and_testing": {
+    "testing_attributes": "All interactive elements, buttons, inputs, links, and key state elements MUST include a 'data-testid' attribute in kebab-case to facilitate robust automated testing.",
+    "contrast": "Text contrast must meet at least WCAG AA standards. The #8888A0 secondary text against #0A0A0F or #111118 has good contrast, ensure it is readable."
+  }
+}
