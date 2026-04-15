@@ -76,6 +76,14 @@ async def get_current_user(request: Request) -> dict:
     except pyjwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+# --- Subscription gating dependencies (built after get_current_user exists) ---
+from backend.subscription import requires_plan  # noqa: E402
+
+_require_starter = requires_plan("starter")
+_require_growth = requires_plan("growth")
+_require_pro = requires_plan("pro")
+
+
 # --- Pydantic Models ---
 class LoginRequest(BaseModel):
     email: str
@@ -139,10 +147,6 @@ class FollowUpAction(BaseModel):
     action: str  # call, whatsapp, dismiss
     patient_id: str
     appointment_id: Optional[str] = None
-
-class StripeCheckoutRequest(BaseModel):
-    plan: str  # starter, professional, enterprise
-    origin_url: str
 
 class RetellCallRequest(BaseModel):
     to_number: str
@@ -354,28 +358,12 @@ When answering:
     elif any(w in msg_lower for w in ["patient", "how many", "stats", "summary"]):
         tools_used.append({"icon": "stats", "label": "Database queried"})
     
-    # Call Claude via emergentintegrations
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-        emergent_key = os.environ.get("EMERGENT_LLM_KEY", "")
-        if not emergent_key:
-            raise ValueError("EMERGENT_LLM_KEY not configured")
-
-        chat = LlmChat(
-            api_key=emergent_key,
-            session_id=f"aria-{conversation_id}",
-            system_message=system_prompt
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-
-        user_message = UserMessage(text=req.message)
-        aria_response = await chat.send_message(user_message)
-    except ValueError as e:
-        logger.error(f"ARIA configuration error: {e}")
-        aria_response = "ARIA is not fully configured yet. Please add the EMERGENT_LLM_KEY to your environment settings."
-    except Exception as e:
-        logger.error(f"ARIA chat error: {type(e).__name__}: {e}")
-        aria_response = "I'm having a brief connection issue. Please try again in a moment."
+    # Call Claude via Anthropic SDK (backend.aria_client handles config + errors)
+    from backend.aria_client import chat as aria_chat_call
+    aria_response = await aria_chat_call(
+        system_prompt=system_prompt,
+        user_message=req.message,
+    )
     
     # Save ARIA response
     await db.aria_conversations.insert_one({
@@ -856,8 +844,8 @@ async def websocket_endpoint(websocket: WebSocket, practice_id: str, token: Opti
 
 # --- RETELL AI INTEGRATION ---
 @api_router.post("/retell/call")
-async def make_retell_call(req: RetellCallRequest, user: dict = Depends(get_current_user)):
-    """Initiate an outbound call via Retell AI"""
+async def make_retell_call(req: RetellCallRequest, user: dict = Depends(_require_growth)):
+    """Initiate an outbound call via Retell AI. Gated at Growth tier."""
     retell_key = os.environ.get("RETELL_API_KEY", "")
     if not retell_key:
         raise HTTPException(status_code=400, detail="Retell AI not configured. Add RETELL_API_KEY in settings.")
@@ -918,8 +906,8 @@ async def retell_status(user: dict = Depends(get_current_user)):
 
 # --- TWILIO WHATSAPP INTEGRATION ---
 @api_router.post("/twilio/send")
-async def send_twilio_message(req: TwilioMessageRequest, user: dict = Depends(get_current_user)):
-    """Send a WhatsApp message via Twilio"""
+async def send_twilio_message(req: TwilioMessageRequest, user: dict = Depends(_require_starter)):
+    """Send a WhatsApp message via Twilio. Gated at Starter tier."""
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
     api_key = os.environ.get("TWILIO_API_KEY", "")
     api_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
@@ -1179,147 +1167,9 @@ async def sync_google_calendar(user: dict = Depends(get_current_user)):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- STRIPE BILLING ---
-BILLING_PLANS = {
-    "starter": {"name": "Starter", "price": 49.00, "features": ["100 calls/month", "500 WhatsApp messages", "1 doctor"]},
-    "professional": {"name": "Professional", "price": 149.00, "features": ["500 calls/month", "2000 WhatsApp messages", "3 doctors", "Priority support"]},
-    "enterprise": {"name": "Enterprise", "price": 399.00, "features": ["Unlimited calls", "Unlimited messages", "Unlimited doctors", "24/7 support", "Custom integrations"]}
-}
-
-@api_router.get("/billing/plans")
-async def get_billing_plans(user: dict = Depends(get_current_user)):
-    """Get available billing plans"""
-    return {"plans": BILLING_PLANS}
-
-@api_router.post("/billing/checkout")
-async def create_checkout_session(req: StripeCheckoutRequest, request: Request, user: dict = Depends(get_current_user)):
-    """Create a Stripe checkout session"""
-    stripe_key = os.environ.get("STRIPE_API_KEY", "")
-    if not stripe_key:
-        raise HTTPException(status_code=400, detail="Stripe not configured")
-    
-    plan = BILLING_PLANS.get(req.plan)
-    if not plan:
-        raise HTTPException(status_code=400, detail="Invalid plan")
-    
-    try:
-        from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionRequest
-        
-        host_url = req.origin_url.rstrip("/")
-        webhook_url = str(request.base_url).rstrip("/") + "/api/webhook/stripe"
-        stripe_checkout = StripeCheckout(api_key=stripe_key, webhook_url=webhook_url)
-        
-        success_url = f"{host_url}/settings?session_id={{CHECKOUT_SESSION_ID}}&plan={req.plan}"
-        cancel_url = f"{host_url}/settings"
-        
-        checkout_req = CheckoutSessionRequest(
-            amount=plan["price"],
-            currency="usd",
-            success_url=success_url,
-            cancel_url=cancel_url,
-            metadata={
-                "practice_id": user.get("practice_id", ""),
-                "user_id": user.get("_id", ""),
-                "plan": req.plan,
-                "plan_name": plan["name"]
-            }
-        )
-        
-        session = await stripe_checkout.create_checkout_session(checkout_req)
-        
-        # Create payment transaction record
-        await db.payment_transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "session_id": session.session_id,
-            "practice_id": user.get("practice_id", ""),
-            "user_email": user.get("email", ""),
-            "plan": req.plan,
-            "amount": plan["price"],
-            "currency": "usd",
-            "payment_status": "initiated",
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })
-        
-        return {"url": session.url, "session_id": session.session_id}
-    except Exception as e:
-        logger.error(f"Stripe checkout error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@api_router.get("/billing/status/{session_id}")
-async def get_checkout_status(session_id: str, user: dict = Depends(get_current_user)):
-    """Get checkout session status"""
-    stripe_key = os.environ.get("STRIPE_API_KEY", "")
-    if not stripe_key:
-        raise HTTPException(status_code=400, detail="Stripe not configured")
-    
-    try:
-        from emergentintegrations.payments.stripe.checkout import StripeCheckout
-        
-        host_url = os.environ.get("FRONTEND_URL", "")
-        webhook_url = host_url + "/api/webhook/stripe"
-        stripe_checkout = StripeCheckout(api_key=stripe_key, webhook_url=webhook_url)
-        
-        status = await stripe_checkout.get_checkout_status(session_id)
-        
-        # Update payment transaction
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": status.payment_status, "status": status.status}}
-        )
-        
-        # If paid, update practice subscription
-        if status.payment_status == "paid":
-            transaction = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
-            if transaction and transaction.get("payment_status") != "completed":
-                await db.payment_transactions.update_one(
-                    {"session_id": session_id},
-                    {"$set": {"payment_status": "completed"}}
-                )
-                await db.practices.update_one(
-                    {"practice_id": user.get("practice_id", "")},
-                    {"$set": {
-                        "subscription_plan": transaction.get("plan", "starter"),
-                        "subscription_status": "active",
-                        "subscription_updated_at": datetime.now(timezone.utc).isoformat()
-                    }}
-                )
-        
-        return {
-            "status": status.status,
-            "payment_status": status.payment_status,
-            "amount_total": status.amount_total,
-            "currency": status.currency
-        }
-    except Exception as e:
-        logger.error(f"Stripe status error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@api_router.post("/webhook/stripe")
-async def stripe_webhook(request: Request):
-    """Handle Stripe payment webhooks"""
-    try:
-        body = await request.body()
-        stripe_key = os.environ.get("STRIPE_API_KEY", "")
-        signature = request.headers.get("Stripe-Signature", "")
-        
-        from emergentintegrations.payments.stripe.checkout import StripeCheckout
-        host_url = os.environ.get("FRONTEND_URL", "")
-        webhook_url = host_url + "/api/webhook/stripe"
-        stripe_checkout = StripeCheckout(api_key=stripe_key, webhook_url=webhook_url)
-        
-        webhook_response = await stripe_checkout.handle_webhook(body, signature)
-        
-        if webhook_response.payment_status == "paid":
-            await db.payment_transactions.update_one(
-                {"session_id": webhook_response.session_id},
-                {"$set": {"payment_status": "completed", "event_type": webhook_response.event_type}}
-            )
-        
-        logger.info(f"Stripe webhook: {webhook_response.event_type} for {webhook_response.session_id}")
-        return {"status": "received"}
-    except Exception as e:
-        logger.error(f"Stripe webhook error: {e}")
-        return {"status": "error"}
+# --- BILLING ---
+# Stripe integration removed. Paddle Billing is implemented in backend/paddle_routes.py
+# and wired into the app below via app.include_router(paddle_router).
 
 # --- INTEGRATION STATUS ---
 @api_router.get("/integrations/status")
@@ -1331,16 +1181,24 @@ async def get_integrations_status(user: dict = Depends(get_current_user)):
     retell_key = os.environ.get("RETELL_API_KEY", "")
     twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
     google_connected = practice.get("google_connected", False) if practice else False
-    stripe_key = os.environ.get("STRIPE_API_KEY", "")
-    
+    paddle_key = os.environ.get("PADDLE_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    sendgrid_key = os.environ.get("SENDGRID_API_KEY", "")
+
     return {
         "retell": {"configured": bool(retell_key), "key_preview": f"...{retell_key[-8:]}" if retell_key else ""},
         "twilio": {"configured": bool(twilio_sid), "key_preview": f"...{twilio_sid[-8:]}" if twilio_sid else ""},
         "google_calendar": {"connected": google_connected, "last_sync": practice.get("google_last_sync", "") if practice else ""},
-        "stripe": {"configured": bool(stripe_key)},
+        "paddle": {
+            "configured": bool(paddle_key),
+            "environment": os.environ.get("PADDLE_ENVIRONMENT", "sandbox"),
+        },
+        "anthropic": {"configured": bool(anthropic_key)},
+        "sendgrid": {"configured": bool(sendgrid_key)},
         "subscription": {
             "plan": practice.get("subscription_plan", "free") if practice else "free",
-            "status": practice.get("subscription_status", "inactive") if practice else "inactive"
+            "status": practice.get("subscription_status", "inactive") if practice else "inactive",
+            "current_period_end": practice.get("subscription_current_period_end") if practice else None,
         }
     }
 
@@ -1688,17 +1546,34 @@ async def startup():
     
     # Seed demo data
     await seed_demo_data(practice_id)
-    
-    # Write test credentials
-    os.makedirs("/app/memory", exist_ok=True)
-    with open("/app/memory/test_credentials.md", "w") as f:
-        f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n- Practice: SmileCare Dental\n\n## Auth Endpoints\n- POST /api/auth/login\n- POST /api/auth/register\n- POST /api/auth/logout\n- GET /api/auth/me\n")
-    logger.info("Test credentials written to /app/memory/test_credentials.md")
 
+# --- Health check (no auth, no DB hit by default) ---
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok",
+        "service": "dentistai-backend",
+        "environment": os.environ.get("APP_ENV", "production"),
+        "paddle_env": os.environ.get("PADDLE_ENVIRONMENT", "sandbox"),
+    }
+
+
+# --- Attach shared resources to app state (used by subscription.py, paddle_routes.py) ---
+app.state.db = db
+
+# --- Main API router (all /api/* routes defined above) ---
 app.include_router(api_router)
 
+# --- Paddle routes ---
+from backend.paddle_routes import router as paddle_router  # noqa: E402
+app.include_router(paddle_router)
+
+# --- CORS ---
 _frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 _allowed_origins = [o.strip() for o in _frontend_url.split(",") if o.strip()]
+# Safety: never fall back to "*" with allow_credentials=True
+if not _allowed_origins:
+    _allowed_origins = ["http://localhost:3000"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -1707,6 +1582,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Optional: Sentry ---
+_sentry_dsn = os.environ.get("SENTRY_DSN", "")
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            integrations=[FastApiIntegration()],
+            traces_sample_rate=0.1,
+            environment=os.environ.get("APP_ENV", "production"),
+        )
+        logger.info("Sentry initialized")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Sentry init failed: %s", e)
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

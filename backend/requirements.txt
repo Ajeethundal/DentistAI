@@ -1,5 +1,9 @@
 aiohappyeyeballs
 aiohttp
+anthropic
+slowapi
+sentry-sdk[fastapi]
+sendgrid
 aiohttp-retry
 aiosignal
 annotated-doc
