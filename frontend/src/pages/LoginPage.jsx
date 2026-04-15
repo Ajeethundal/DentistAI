@@ -120,7 +120,7 @@ export default function LoginPage() {
         </div>
 
         <p className="text-center text-xs text-[#8888A0]/60 mt-6">
-          Powered by ARIA — AI Receptionist & Intelligence Assistant
+          Powered by DentistAI © 2026
         </p>
       </div>
     </div>

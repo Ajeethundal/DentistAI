@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import axios from 'axios';
 
 const API = process.env.REACT_APP_BACKEND_URL;
@@ -8,17 +8,63 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const refreshing = useRef(false);
+
+  const clearAuth = useCallback(() => {
+    localStorage.removeItem('token');
+    setUser(null);
+    window.location.href = '/login';
+  }, []);
+
+  // Shared Axios instance with 401 interceptor
+  const apiInstance = useMemo(() => {
+    const instance = axios.create({
+      baseURL: `${API}/api`,
+      withCredentials: true,
+    });
+
+    // Request interceptor: attach token to every request
+    instance.interceptors.request.use((config) => {
+      const token = localStorage.getItem('token');
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+      return config;
+    });
+
+    // Response interceptor: catch 401s and clear auth
+    instance.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        if (error.response && error.response.status === 401) {
+          if (!refreshing.current) {
+            refreshing.current = true;
+            localStorage.removeItem('token');
+            setUser(null);
+            window.location.href = '/login';
+          }
+        }
+        return Promise.reject(error);
+      }
+    );
+
+    return instance;
+  }, []);
 
   const checkAuth = useCallback(async () => {
     try {
       const token = localStorage.getItem('token');
-      if (!token) { setLoading(false); return; }
+      if (!token) {
+        setLoading(false);
+        return;
+      }
       const { data } = await axios.get(`${API}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
-        withCredentials: true
+        withCredentials: true,
       });
       setUser({ ...data, token });
-    } catch {
+    } catch (err) {
+      console.error('Auth check failed:', err);
       localStorage.removeItem('token');
       setUser(null);
     } finally {
@@ -26,30 +72,46 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  useEffect(() => { checkAuth(); }, [checkAuth]);
+  useEffect(() => {
+    checkAuth();
+  }, [checkAuth]);
 
   const login = async (email, password) => {
-    const { data } = await axios.post(`${API}/api/auth/login`, { email, password }, { withCredentials: true });
+    const { data } = await axios.post(
+      `${API}/api/auth/login`,
+      { email, password },
+      { withCredentials: true }
+    );
     localStorage.setItem('token', data.token);
     setUser(data);
+    refreshing.current = false;
     return data;
   };
 
   const register = async (email, password, name, practice_name) => {
-    const { data } = await axios.post(`${API}/api/auth/register`, { email, password, name, practice_name }, { withCredentials: true });
+    const { data } = await axios.post(
+      `${API}/api/auth/register`,
+      { email, password, name, practice_name },
+      { withCredentials: true }
+    );
     localStorage.setItem('token', data.token);
     setUser(data);
+    refreshing.current = false;
     return data;
   };
 
   const logout = async () => {
-    try { await axios.post(`${API}/api/auth/logout`, {}, { withCredentials: true }); } catch {}
+    try {
+      await apiInstance.post('/auth/logout', {});
+    } catch (err) {
+      console.error('Logout request failed:', err);
+    }
     localStorage.removeItem('token');
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, apiInstance }}>
       {children}
     </AuthContext.Provider>
   );
@@ -61,13 +123,7 @@ export function useAuth() {
   return ctx;
 }
 
-// Axios helper with auth
 export function useApi() {
-  const { user } = useAuth();
-  const api = axios.create({
-    baseURL: `${API}/api`,
-    withCredentials: true,
-    headers: user?.token ? { Authorization: `Bearer ${user.token}` } : {}
-  });
-  return api;
+  const { apiInstance } = useAuth();
+  return apiInstance;
 }

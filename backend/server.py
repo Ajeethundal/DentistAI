@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import RedirectResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -29,6 +29,7 @@ app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
 JWT_ALGORITHM = "HS256"
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -198,8 +199,8 @@ async def login(req: LoginRequest, response: Response):
     user_id = str(user["_id"])
     access_token = create_access_token(user_id, email)
     refresh_token = create_refresh_token(user_id)
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=86400, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=604800, path="/")
     return {"id": user_id, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "doctor"), "practice_id": user.get("practice_id", ""), "token": access_token}
 
 @api_router.post("/auth/register")
@@ -220,8 +221,8 @@ async def register(req: RegisterRequest, response: Response):
     user_id = str(result.inserted_id)
     access_token = create_access_token(user_id, email)
     refresh_token = create_refresh_token(user_id)
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=86400, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=COOKIE_SECURE, samesite="lax", max_age=604800, path="/")
     return {"id": user_id, "email": email, "name": req.name, "role": "doctor", "practice_id": practice_id, "token": access_token}
 
 @api_router.post("/auth/logout")
@@ -356,18 +357,25 @@ When answering:
     # Call Claude via emergentintegrations
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
-        
+
+        emergent_key = os.environ.get("EMERGENT_LLM_KEY", "")
+        if not emergent_key:
+            raise ValueError("EMERGENT_LLM_KEY not configured")
+
         chat = LlmChat(
-            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            api_key=emergent_key,
             session_id=f"aria-{conversation_id}",
             system_message=system_prompt
         ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        
+
         user_message = UserMessage(text=req.message)
         aria_response = await chat.send_message(user_message)
+    except ValueError as e:
+        logger.error(f"ARIA configuration error: {e}")
+        aria_response = "ARIA is not fully configured yet. Please add the EMERGENT_LLM_KEY to your environment settings."
     except Exception as e:
-        logger.error(f"ARIA chat error: {e}")
-        aria_response = f"I'm having a brief connection issue, but I'm still here! Let me help you with that. Based on what I can see in the schedule, I have all the information ready. Could you try asking me again?"
+        logger.error(f"ARIA chat error: {type(e).__name__}: {e}")
+        aria_response = "I'm having a brief connection issue. Please try again in a moment."
     
     # Save ARIA response
     await db.aria_conversations.insert_one({
@@ -414,8 +422,19 @@ async def get_appointments(user: dict = Depends(get_current_user), date_from: Op
 @api_router.post("/appointments")
 async def create_appointment(req: AppointmentCreate, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
+
+    # Check for appointment conflict
+    existing_appt = await db.appointments.find_one({
+        "practice_id": practice_id,
+        "date": req.date,
+        "time": req.time,
+        "status": {"$nin": ["cancelled"]}
+    })
+    if existing_appt:
+        raise HTTPException(status_code=409, detail="Time slot already booked. Please choose another time.")
+
     appt_id = str(uuid.uuid4())
-    
+
     # Find or create patient
     patient = await db.patients.find_one({"practice_id": practice_id, "name": {"$regex": req.patient_name, "$options": "i"}}, {"_id": 0})
     patient_id = patient["id"] if patient else str(uuid.uuid4())
@@ -446,7 +465,7 @@ async def create_appointment(req: AppointmentCreate, user: dict = Depends(get_cu
     })
     
     appt_copy = {k: v for k, v in appointment.items() if k != "_id"}
-    return appt_copy
+    return Response(content=json.dumps(appt_copy), status_code=201, media_type="application/json")
 
 @api_router.put("/appointments/{appointment_id}")
 async def update_appointment(appointment_id: str, req: AppointmentUpdate, user: dict = Depends(get_current_user)):
@@ -474,19 +493,33 @@ async def get_patients(user: dict = Depends(get_current_user), search: Optional[
             {"email": {"$regex": search, "$options": "i"}}
         ]
     patients = await db.patients.find(query, {"_id": 0}).sort("name", 1).to_list(500)
-    
-    # Enrich with appointment data
-    for p in patients:
-        last_appt = await db.appointments.find_one(
-            {"practice_id": practice_id, "patient_id": p["id"], "status": {"$in": ["completed", "confirmed"]}},
-            {"_id": 0}
-        )
-        next_appt = await db.appointments.find_one(
-            {"practice_id": practice_id, "patient_id": p["id"], "date": {"$gte": datetime.now(timezone.utc).strftime("%Y-%m-%d")}, "status": {"$in": ["confirmed", "pending"]}},
-            {"_id": 0}
-        )
-        p["last_visit"] = last_appt["date"] if last_appt else None
-        p["next_appointment"] = f"{next_appt['date']} {next_appt['time']}" if next_appt else None
+
+    if patients:
+        patient_ids = [p["id"] for p in patients]
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Batch load last completed/confirmed appointment per patient
+        last_appts_cursor = db.appointments.aggregate([
+            {"$match": {"practice_id": practice_id, "patient_id": {"$in": patient_ids}, "status": {"$in": ["completed", "confirmed"]}}},
+            {"$sort": {"date": -1}},
+            {"$group": {"_id": "$patient_id", "date": {"$first": "$date"}}}
+        ])
+        last_appts = {doc["_id"]: doc["date"] async for doc in last_appts_cursor}
+
+        # Batch load next upcoming appointment per patient
+        next_appts_cursor = db.appointments.aggregate([
+            {"$match": {"practice_id": practice_id, "patient_id": {"$in": patient_ids}, "date": {"$gte": today}, "status": {"$in": ["confirmed", "pending"]}}},
+            {"$sort": {"date": 1, "time": 1}},
+            {"$group": {"_id": "$patient_id", "date": {"$first": "$date"}, "time": {"$first": "$time"}}}
+        ])
+        next_appts = {doc["_id"]: doc async for doc in next_appts_cursor}
+
+        for p in patients:
+            pid = p["id"]
+            p["last_visit"] = last_appts.get(pid)
+            na = next_appts.get(pid)
+            p["next_appointment"] = f"{na['date']} {na['time']}" if na else None
+
     return patients
 
 @api_router.get("/patients/{patient_id}")
@@ -518,7 +551,7 @@ async def update_patient(patient_id: str, req: PatientUpdate, user: dict = Depen
     update_data = {k: v for k, v in req.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
-    await db.appointments.update_one({"id": patient_id}, {"$set": update_data})
+    await db.patients.update_one({"id": patient_id}, {"$set": update_data})
     updated = await db.patients.find_one({"id": patient_id}, {"_id": 0})
     return updated
 
@@ -594,16 +627,30 @@ async def get_follow_ups(user: dict = Depends(get_current_user)):
     # No-shows this week
     no_shows = await db.appointments.find({"practice_id": practice_id, "status": "noshow"}, {"_id": 0}).to_list(50)
     
-    # Overdue recalls (patients with last visit > 6 months ago)
+    # Overdue recalls (patients with last visit > 6 months ago) — aggregation to avoid N+1
     all_patients = await db.patients.find({"practice_id": practice_id}, {"_id": 0}).to_list(500)
+    patient_ids = [p["id"] for p in all_patients]
+    patients_by_id = {p["id"]: p for p in all_patients}
+
+    # Batch: get last completed appointment per patient
+    last_completed_cursor = db.appointments.aggregate([
+        {"$match": {"practice_id": practice_id, "patient_id": {"$in": patient_ids}, "status": "completed"}},
+        {"$sort": {"date": -1}},
+        {"$group": {"_id": "$patient_id", "date": {"$first": "$date"}, "last_appt": {"$first": "$$ROOT"}}}
+    ])
+    last_completed = {}
+    async for doc in last_completed_cursor:
+        last_completed[doc["_id"]] = doc
+
     overdue = []
     for p in all_patients:
-        last_appt = await db.appointments.find_one(
-            {"patient_id": p["id"], "status": "completed"}, {"_id": 0}
-        )
-        if last_appt and last_appt.get("date", "") < six_months_ago:
+        pid = p["id"]
+        lc = last_completed.get(pid)
+        if lc and lc["date"] < six_months_ago:
+            last_appt = lc["last_appt"]
+            last_appt.pop("_id", None)
             overdue.append({**p, "last_appointment": last_appt})
-        elif not last_appt and p.get("created_at", "") < six_months_ago:
+        elif not lc and p.get("created_at", "") < six_months_ago:
             overdue.append(p)
     
     # Pending confirmations for tomorrow
@@ -614,15 +661,67 @@ async def get_follow_ups(user: dict = Depends(get_current_user)):
 @api_router.post("/follow-ups/action")
 async def follow_up_action(req: FollowUpAction, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
-    if req.action == "dismiss" and req.appointment_id:
-        await db.appointments.update_one({"id": req.appointment_id}, {"$set": {"status": "cancelled"}})
-    
-    await db.activity_feed.insert_one({
-        "id": str(uuid.uuid4()), "practice_id": practice_id,
-        "type": "followup", "description": f"Follow-up {req.action} for patient",
-        "patient_name": "", "status": "done",
-        "created_at": datetime.now(timezone.utc).isoformat()
-    })
+    patient = await db.patients.find_one({"id": req.patient_id, "practice_id": practice_id}, {"_id": 0})
+    patient_name = patient.get("name", "Patient") if patient else "Patient"
+    practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+    practice_name = practice.get("name", "the dental practice") if practice else "the dental practice"
+
+    if req.action == "call":
+        call_record = {
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "patient_id": req.patient_id,
+            "patient_name": patient_name,
+            "phone": patient.get("phone", "") if patient else "",
+            "direction": "outbound", "duration_secs": 0,
+            "transcript": [], "outcome": "follow-up",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.calls.insert_one(call_record)
+        activity = {
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "type": "call", "description": f"Follow-up call initiated to {patient_name}",
+            "patient_name": patient_name, "status": "done",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.activity_feed.insert_one(activity)
+        await broadcast_activity(practice_id, activity)
+
+    elif req.action == "whatsapp":
+        msg_body = (
+            f"Hi {patient_name}, this is a follow-up from {practice_name}. "
+            f"We noticed you missed your recent appointment. Would you like to reschedule? "
+            f"Reply YES to book a new time."
+        )
+        msg = {
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "patient_id": req.patient_id,
+            "direction": "outbound", "body": msg_body,
+            "sender": "aria", "read": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.messages.insert_one(msg)
+        activity = {
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "type": "whatsapp", "description": f"Follow-up WhatsApp sent to {patient_name}",
+            "patient_name": patient_name, "status": "done",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.activity_feed.insert_one(activity)
+        await broadcast_activity(practice_id, activity)
+
+    elif req.action == "dismiss":
+        if req.appointment_id:
+            await db.appointments.update_one({"id": req.appointment_id}, {"$set": {"status": "cancelled"}})
+        await db.activity_feed.insert_one({
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "type": "followup", "description": f"Follow-up dismissed for {patient_name}",
+            "patient_name": patient_name, "status": "done",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {req.action}")
+
     return {"message": f"Follow-up action '{req.action}' completed"}
 
 # --- SETTINGS ---
@@ -726,13 +825,30 @@ async def webhook_whatsapp(request: Request):
 
 # --- WEBSOCKET ---
 @app.websocket("/ws/{practice_id}")
-async def websocket_endpoint(websocket: WebSocket, practice_id: str):
+async def websocket_endpoint(websocket: WebSocket, practice_id: str, token: Optional[str] = None):
     """WebSocket for real-time activity feed updates"""
+    # Authenticate via query param token or cookie
+    ws_token = token or websocket.cookies.get("access_token")
+    if not ws_token:
+        await websocket.close(code=4001)
+        return
+    try:
+        payload = pyjwt.decode(ws_token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            await websocket.close(code=4001)
+            return
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user or user.get("practice_id") != practice_id:
+            await websocket.close(code=4003)
+            return
+    except pyjwt.InvalidTokenError:
+        await websocket.close(code=4001)
+        return
+
     await ws_manager.connect(websocket, practice_id)
     try:
         while True:
             data = await websocket.receive_text()
-            # Client can send pings or requests
             if data == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -1581,9 +1697,12 @@ async def startup():
 
 app.include_router(api_router)
 
+_frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+_allowed_origins = [o.strip() for o in _frontend_url.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000"), "*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
