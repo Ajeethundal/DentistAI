@@ -32,17 +32,36 @@ export function AuthProvider({ children }) {
       return config;
     });
 
-    // Response interceptor: catch 401s and clear auth
+    // Response interceptor: handle 401 (logout) and 402 (upgrade required)
     instance.interceptors.response.use(
       (response) => response,
       (error) => {
-        if (error.response && error.response.status === 401) {
+        const status = error.response?.status;
+        if (status === 401) {
           if (!refreshing.current) {
             refreshing.current = true;
             localStorage.removeItem('token');
             setUser(null);
             window.location.href = '/login';
           }
+        } else if (status === 402) {
+          // Subscription upgrade required — dispatch event for <UpgradeModal>
+          const detail = error.response?.data?.detail || {};
+          window.dispatchEvent(
+            new CustomEvent('upgrade-required', {
+              detail: {
+                currentPlan: detail.current_plan || 'free',
+                minPlan: detail.min_plan || 'starter',
+                message: detail.message || 'This feature requires a paid plan.',
+              },
+            })
+          );
+        } else if (status === 429) {
+          window.dispatchEvent(
+            new CustomEvent('rate-limited', {
+              detail: { message: 'Too many requests. Please wait a moment.' },
+            })
+          );
         }
         return Promise.reject(error);
       }

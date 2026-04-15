@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth, useApi } from '../../context/AuthContext';
 import {
   LayoutDashboard, Calendar, Users, Phone, MessageSquare,
-  RefreshCw, Settings, ChevronLeft, ChevronRight, LogOut
+  RefreshCw, Settings, ChevronLeft, ChevronRight, LogOut,
+  CreditCard, Sparkles
 } from 'lucide-react';
 
 const navItems = [
@@ -13,18 +14,76 @@ const navItems = [
   { path: '/calls', label: 'Calls', icon: Phone },
   { path: '/whatsapp', label: 'WhatsApp', icon: MessageSquare },
   { path: '/follow-ups', label: 'Follow-ups', icon: RefreshCw },
+  { path: '/billing', label: 'Billing', icon: CreditCard },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 
-export default function Sidebar() {
+const PLAN_COLOR = {
+  free: 'text-[#8888A0] bg-white/5 border-[rgba(255,255,255,0.07)]',
+  starter: 'text-[#00D4AA] bg-[#00D4AA]/10 border-[#00D4AA]/20',
+  growth: 'text-[#6C63FF] bg-[#6C63FF]/10 border-[#6C63FF]/20',
+  pro: 'text-[#FFB84D] bg-[#FFB84D]/10 border-[#FFB84D]/20',
+};
+
+function SubscriptionBadge({ collapsed }) {
+  const api = useApi();
+  const [sub, setSub] = useState(null);
+
+  useEffect(() => {
+    let cancel = false;
+    api.get('/paddle/subscription')
+      .then(({ data }) => { if (!cancel) setSub(data); })
+      .catch(() => { /* paddle not configured yet — silently ignore */ });
+    return () => { cancel = true; };
+  }, [api]);
+
+  if (!sub) return null;
+  const plan = sub.plan || 'free';
+  const isPaid = plan !== 'free' && sub.status === 'active';
+  const color = PLAN_COLOR[plan] || PLAN_COLOR.free;
+
+  if (collapsed) {
+    return (
+      <NavLink
+        to={isPaid ? '/billing' : '/pricing'}
+        className={`flex items-center justify-center w-8 h-8 rounded-lg border ${color}`}
+        title={`Plan: ${plan}`}
+      >
+        <Sparkles size={14} />
+      </NavLink>
+    );
+  }
+
+  return (
+    <NavLink
+      to={isPaid ? '/billing' : '/pricing'}
+      className={`block px-3 py-2 rounded-lg border text-xs transition-all ${color} hover:opacity-90`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium uppercase tracking-wider">{plan}</span>
+        <span className="text-[10px] opacity-70">
+          {isPaid ? 'Manage →' : 'Upgrade →'}
+        </span>
+      </div>
+    </NavLink>
+  );
+}
+
+export default function Sidebar({ mobileOpen, onMobileClose }) {
   const [collapsed, setCollapsed] = useState(false);
   const { user, logout } = useAuth();
   const location = useLocation();
 
+  // On mobile, the sidebar is controlled by mobileOpen. On desktop, by `collapsed`.
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+
   return (
     <aside
       data-testid="sidebar"
-      className={`fixed left-0 top-0 h-screen z-40 flex flex-col border-r border-[rgba(255,255,255,0.07)] bg-[#0A0A0F] transition-all duration-300 ${collapsed ? 'w-[72px]' : 'w-64'}`}
+      className={`fixed left-0 top-0 h-screen z-40 flex flex-col border-r border-[rgba(255,255,255,0.07)] bg-[#0A0A0F] transition-transform md:transition-all duration-300
+        ${collapsed ? 'md:w-[72px]' : 'md:w-64'}
+        w-64
+        ${mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
     >
       {/* Logo */}
       <div className="flex items-center gap-3 px-5 h-16 border-b border-[rgba(255,255,255,0.07)]">
@@ -46,6 +105,7 @@ export default function Sidebar() {
             <NavLink
               key={path}
               to={path}
+              onClick={() => { if (isMobile && onMobileClose) onMobileClose(); }}
               data-testid={`nav-${label.toLowerCase().replace(/\s+/g, '-')}`}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 group ${
                 isActive
@@ -64,6 +124,9 @@ export default function Sidebar() {
 
       {/* Bottom section */}
       <div className="border-t border-[rgba(255,255,255,0.07)] p-3 space-y-3">
+        {/* Subscription badge */}
+        <SubscriptionBadge collapsed={collapsed} />
+
         {/* ARIA Status */}
         <div className={`flex items-center gap-3 px-3 py-2 ${collapsed ? 'justify-center' : ''}`}>
           <div className="relative flex-shrink-0">
@@ -73,7 +136,7 @@ export default function Sidebar() {
           {!collapsed && (
             <div>
               <p className="text-xs font-medium text-[#F0F0F5]">ARIA Online</p>
-              <p className="text-[10px] text-[#8888A0]">Last action: 3 min ago</p>
+              <p className="text-[10px] text-[#8888A0]">AI receptionist ready</p>
             </div>
           )}
         </div>
@@ -102,11 +165,11 @@ export default function Sidebar() {
           )}
         </div>
 
-        {/* Collapse toggle */}
+        {/* Collapse toggle (desktop only) */}
         <button
           data-testid="sidebar-toggle"
           onClick={() => setCollapsed(!collapsed)}
-          className="w-full flex items-center justify-center py-2 rounded-lg text-[#8888A0] hover:text-[#F0F0F5] hover:bg-[rgba(255,255,255,0.05)] transition-all"
+          className="w-full hidden md:flex items-center justify-center py-2 rounded-lg text-[#8888A0] hover:text-[#F0F0F5] hover:bg-[rgba(255,255,255,0.05)] transition-all"
         >
           {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
         </button>

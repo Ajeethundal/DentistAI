@@ -83,6 +83,14 @@ _require_starter = requires_plan("starter")
 _require_growth = requires_plan("growth")
 _require_pro = requires_plan("pro")
 
+# --- Rate limiting ---
+from backend.rate_limit import limiter  # noqa: E402
+from slowapi import _rate_limit_exceeded_handler  # noqa: E402
+from slowapi.errors import RateLimitExceeded  # noqa: E402
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 # --- Pydantic Models ---
 class LoginRequest(BaseModel):
@@ -193,7 +201,8 @@ async def broadcast_activity(practice_id: str, activity: dict):
 
 # --- AUTH ROUTES ---
 @api_router.post("/auth/login")
-async def login(req: LoginRequest, response: Response):
+@limiter.limit("10/minute")
+async def login(req: LoginRequest, request: Request, response: Response):
     email = req.email.lower().strip()
     user = await db.users.find_one({"email": email})
     if not user:
@@ -208,7 +217,8 @@ async def login(req: LoginRequest, response: Response):
     return {"id": user_id, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "doctor"), "practice_id": user.get("practice_id", ""), "token": access_token}
 
 @api_router.post("/auth/register")
-async def register(req: RegisterRequest, response: Response):
+@limiter.limit("5/minute")
+async def register(req: RegisterRequest, request: Request, response: Response):
     email = req.email.lower().strip()
     existing = await db.users.find_one({"email": email})
     if existing:
@@ -276,7 +286,8 @@ async def get_activity_feed(user: dict = Depends(get_current_user), limit: int =
 
 # --- ARIA CHAT ---
 @api_router.post("/aria/chat")
-async def aria_chat(req: AriaChatRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def aria_chat(req: AriaChatRequest, request: Request, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
     practice = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
     practice_name = practice.get("name", "the dental practice") if practice else "the dental practice"
@@ -731,10 +742,15 @@ async def update_settings(req: SettingsUpdate, user: dict = Depends(get_current_
     updated = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
     return updated
 
-# --- WEBHOOKS (Demo mode) ---
+# --- WEBHOOKS ---
 @api_router.post("/webhooks/retell")
 async def webhook_retell(request: Request):
-    body = await request.json()
+    from backend.webhook_security import verify_retell
+    raw = await request.body()
+    sig = request.headers.get("X-Retell-Signature", "") or request.headers.get("x-retell-signature", "")
+    if not verify_retell(signature_header=sig, raw_body=raw):
+        raise HTTPException(status_code=401, detail="Invalid Retell signature")
+    body = json.loads(raw) if raw else {}
     logger.info(f"Retell webhook received: {json.dumps(body)[:200]}")
     
     # Process call ended event
@@ -775,12 +791,21 @@ async def webhook_retell(request: Request):
 @api_router.post("/webhooks/whatsapp")
 async def webhook_whatsapp(request: Request):
     """Handle incoming WhatsApp messages from Twilio"""
+    from backend.webhook_security import verify_twilio
     try:
         form_data = await request.form()
         params = dict(form_data)
     except Exception:
         body = await request.json()
         params = body
+    sig = request.headers.get("X-Twilio-Signature", "") or request.headers.get("x-twilio-signature", "")
+    # Twilio signs the FULL URL of the webhook endpoint — including scheme + host.
+    # Use X-Forwarded-* headers when behind a proxy/ALB.
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    full_url = f"{scheme}://{host}{request.url.path}"
+    if not verify_twilio(signature_header=sig, url=full_url, params={k: str(v) for k, v in params.items()}):
+        raise HTTPException(status_code=401, detail="Invalid Twilio signature")
     
     message_body = params.get("Body", params.get("body", ""))
     from_number = params.get("From", params.get("from", "")).replace("whatsapp:", "")

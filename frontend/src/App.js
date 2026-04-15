@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from '@/context/AuthContext';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ToastProvider } from '@/components/Toast';
+import UpgradeModal from '@/components/UpgradeModal';
 import Layout from '@/components/layout/Layout';
 import LandingPage from '@/pages/LandingPage';
 import LoginPage from '@/pages/LoginPage';
@@ -22,6 +23,7 @@ function App() {
       <AuthProvider>
         <ToastProvider>
           <BrowserRouter>
+            <UpgradeModal />
             <Routes>
               {/* Public */}
               <Route path="/" element={<LandingPage />} />
