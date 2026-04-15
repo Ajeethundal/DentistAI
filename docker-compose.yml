@@ -1,0 +1,61 @@
+version: "3.9"
+
+# Local development stack:
+#   docker compose up
+# Brings up MongoDB + the FastAPI backend. Frontend is run separately
+# with `cd frontend && yarn start` (it talks to http://localhost:8000).
+#
+# Stops with Ctrl+C. Data persists in the `mongo_data` volume across restarts.
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URL=mongodb://mongo:27017
+      - DB_NAME=dentistai
+      - JWT_SECRET=DEV_ONLY_CHANGE_IN_PROD_7d4f3e9b2a1c6f5e8a9b0d3c4e7f1a2b5d8c9e0f3a4b7c8d1e2f5a6b9c0d3e4f
+      - COOKIE_SECURE=false
+      - FRONTEND_URL=http://localhost:3000
+      - APP_ENV=development
+      - ADMIN_EMAIL=admin@dentistai.com
+      - ADMIN_PASSWORD=admin123
+      - DEMO_MODE=true
+      - RATE_LIMIT_DISABLED=true
+      # Paddle sandbox products (pre-created)
+      - PADDLE_ENVIRONMENT=sandbox
+      - PADDLE_WEBHOOK_SECRET=${PADDLE_WEBHOOK_SECRET:-pdl_ntfset_01kp9exm5rt3hyxtkes70j3tbt_P8qWTGg85/0rXDlmTXcdYtYBDvcg9D7m}
+      - PADDLE_PRICE_STARTER=${PADDLE_PRICE_STARTER:-pri_01kp9ettksfwf60gjy50sz3y7c}
+      - PADDLE_PRICE_GROWTH=${PADDLE_PRICE_GROWTH:-pri_01kp9etv4cydbfqr018amtvgf7}
+      - PADDLE_PRICE_PRO=${PADDLE_PRICE_PRO:-pri_01kp9etvmm0427gc7781pxqgx4}
+      # Optional integrations — override from your shell env if you have them
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER:-}
+      - TWILIO_WHATSAPP_FROM=${TWILIO_WHATSAPP_FROM:-}
+      - RETELL_API_KEY=${RETELL_API_KEY:-}
+      - RETELL_AGENT_ID=${RETELL_AGENT_ID:-}
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo_data:

@@ -110,9 +110,11 @@ async def list_plans():
 async def paddle_config():
     """Return the Paddle.js client-side token + environment so the frontend
     can initialize the SDK. The client-side token is SAFE to expose."""
+    demo = os.environ.get("DEMO_MODE", "false").lower() == "true"
     return {
         "environment": client_side_environment(),
         "client_token": os.environ.get("PADDLE_CLIENT_TOKEN", ""),
+        "demo_mode": demo,
     }
 
 
@@ -168,6 +170,30 @@ async def cancel_subscription(request: Request):
         }},
     )
     return {"ok": True, "effective_at": data.get("scheduled_change", {}).get("effective_at")}
+
+
+# ---------------------------------------------------------------------------
+# Demo activation — lets a demo user "subscribe" to a plan instantly without
+# going through real Paddle checkout. Only available when DEMO_MODE=true.
+# ---------------------------------------------------------------------------
+@router.post("/demo-activate")
+async def demo_activate(request: Request):
+    if os.environ.get("DEMO_MODE", "false").lower() != "true":
+        raise HTTPException(403, "Demo activation disabled — set DEMO_MODE=true")
+    from backend.server import get_current_user
+    from backend.demo_mode import demo_subscription_payload
+    user = await get_current_user(request)
+    body = await request.json()
+    plan = (body.get("plan") or "starter").lower()
+    if plan not in ("starter", "growth", "pro"):
+        raise HTTPException(400, "plan must be starter, growth, or pro")
+    update = demo_subscription_payload(plan)
+    db = request.app.state.db
+    await db.practices.update_one(
+        {"practice_id": user.get("practice_id", "")},
+        {"$set": update}, upsert=True,
+    )
+    return {"ok": True, "plan": plan, "status": "active", "demo": True}
 
 
 # ---------------------------------------------------------------------------

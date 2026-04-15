@@ -871,7 +871,46 @@ async def websocket_endpoint(websocket: WebSocket, practice_id: str, token: Opti
 @api_router.post("/retell/call")
 async def make_retell_call(req: RetellCallRequest, user: dict = Depends(_require_growth)):
     """Initiate an outbound call via Retell AI. Gated at Growth tier."""
+    # DEMO MODE — return a scripted mock call and seed it into the feed.
+    from backend.demo_mode import is_demo, generate_mock_call
     retell_key = os.environ.get("RETELL_API_KEY", "")
+    if is_demo() or not retell_key:
+        mock = generate_mock_call(req.patient_name or "Patient", req.to_number, req.objective or "")
+        practice_id = user.get("practice_id", "")
+        # Persist as a call record
+        call_record = {
+            "id": mock["call_id"],
+            "practice_id": practice_id,
+            "patient_id": "",
+            "patient_name": req.patient_name or f"Patient — {req.to_number}",
+            "phone": req.to_number,
+            "direction": "outbound",
+            "duration_secs": mock["duration_secs"],
+            "transcript": mock["transcript"],
+            "outcome": mock["outcome"],
+            "summary": mock["summary"],
+            "status": "completed",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.calls.insert_one(call_record)
+        activity = {
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "type": "call", "description": f"[Demo] ARIA called {req.patient_name or req.to_number} — {mock['summary']}",
+            "patient_name": req.patient_name or "", "status": "done",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.activity_feed.insert_one(activity)
+        await broadcast_activity(practice_id, activity)
+        return {
+            "status": "success",
+            "call_id": mock["call_id"],
+            "message": f"Demo call to {req.to_number} completed — {mock['summary']}",
+            "mock": True,
+            "transcript": mock["transcript"],
+            "outcome": mock["outcome"],
+            "duration_secs": mock["duration_secs"],
+        }
+
     if not retell_key:
         raise HTTPException(status_code=400, detail="Retell AI not configured. Add RETELL_API_KEY in settings.")
     
@@ -938,19 +977,57 @@ async def send_twilio_message(req: TwilioMessageRequest, user: dict = Depends(_r
     api_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
     from_number = os.environ.get("TWILIO_WHATSAPP_FROM", "")
     
-    if not account_sid or not api_key:
-        # Demo mode - simulate sending
+    from backend.demo_mode import is_demo, generate_mock_inbound_reply
+    if is_demo() or not account_sid or not api_key:
+        # Demo mode — save outbound, optionally fabricate an inbound reply
         practice_id = user.get("practice_id", "")
         patient = await db.patients.find_one({"phone": req.to_number}, {"_id": 0})
+        now = datetime.now(timezone.utc)
+        out_msg = None
         if patient:
-            msg = {
+            out_msg = {
                 "id": str(uuid.uuid4()), "practice_id": practice_id,
                 "patient_id": patient["id"], "direction": "outbound",
                 "body": req.message, "sender": "doctor", "read": True,
-                "created_at": datetime.now(timezone.utc).isoformat()
+                "created_at": now.isoformat(),
             }
-            await db.messages.insert_one(msg)
-        return {"status": "demo", "message": "Twilio not fully configured. Message saved locally. Add TWILIO_ACCOUNT_SID in settings to send real WhatsApp messages."}
+            await db.messages.insert_one(out_msg)
+
+            # Activity feed
+            activity = {
+                "id": str(uuid.uuid4()), "practice_id": practice_id,
+                "type": "whatsapp",
+                "description": f"[Demo] WhatsApp sent to {patient['name']}: {req.message[:60]}",
+                "patient_name": patient["name"], "status": "done",
+                "created_at": now.isoformat(),
+            }
+            await db.activity_feed.insert_one(activity)
+            await broadcast_activity(practice_id, activity)
+
+            # ~30% chance patient "replies" a moment later
+            reply_body = generate_mock_inbound_reply(req.message)
+            if reply_body:
+                reply = {
+                    "id": str(uuid.uuid4()), "practice_id": practice_id,
+                    "patient_id": patient["id"], "direction": "inbound",
+                    "body": reply_body, "sender": "patient", "read": False,
+                    "created_at": (now + timedelta(seconds=3)).isoformat(),
+                }
+                await db.messages.insert_one(reply)
+                reply_activity = {
+                    "id": str(uuid.uuid4()), "practice_id": practice_id,
+                    "type": "whatsapp",
+                    "description": f"[Demo] {patient['name']} replied: {reply_body[:60]}",
+                    "patient_name": patient["name"], "status": "done",
+                    "created_at": (now + timedelta(seconds=3)).isoformat(),
+                }
+                await db.activity_feed.insert_one(reply_activity)
+                await broadcast_activity(practice_id, reply_activity)
+        return {
+            "status": "demo",
+            "message": "Message delivered (demo). Wire Twilio credentials in production to send real WhatsApp messages.",
+            "mock": True,
+        }
     
     try:
         from twilio.rest import Client

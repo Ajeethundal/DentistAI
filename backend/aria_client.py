@@ -28,9 +28,15 @@ async def chat(
     model: str = "claude-sonnet-4-5-20250929",
     max_tokens: int = 1024,
 ) -> str:
-    """Return ARIA's reply or a graceful fallback message."""
+    """Return ARIA's reply, or a canned demo reply, or a graceful fallback."""
     key = _key()
     if not key:
+        # In demo mode, produce a convincing canned reply so the demo account
+        # still showcases ARIA. In real environments without a key, nudge
+        # the admin to configure Anthropic.
+        if os.environ.get("DEMO_MODE", "false").lower() == "true":
+            from backend.demo_mode import canned_aria_reply
+            return canned_aria_reply(user_message)
         return (
             "ARIA is not fully configured yet. Ask the administrator to add "
             "ANTHROPIC_API_KEY to the backend environment to enable me."

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { Check, Sparkles, Loader2, ArrowLeft } from 'lucide-react';
+import { Check, Sparkles, Loader2, ArrowLeft, Zap } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { openCheckout } from '@/lib/paddle';
 
@@ -14,13 +14,20 @@ export default function PricingPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState('');
+  const [config, setConfig] = useState({ demo_mode: false });
 
   useEffect(() => {
     let cancel = false;
     (async () => {
       try {
-        const { data } = await axios.get(`${API}/api/paddle/plans`);
-        if (!cancel) setPlans(data.plans || []);
+        const [plansRes, cfgRes] = await Promise.all([
+          axios.get(`${API}/api/paddle/plans`),
+          axios.get(`${API}/api/paddle/config`).catch(() => ({ data: {} })),
+        ]);
+        if (!cancel) {
+          setPlans(plansRes.data.plans || []);
+          setConfig(cfgRes.data || {});
+        }
       } catch (e) {
         if (!cancel) setError('Could not load pricing. Please try again.');
       } finally {
@@ -45,16 +52,24 @@ export default function PricingPage() {
   const onSubscribe = async (plan) => {
     setError('');
     if (!user) {
-      // Route them to sign up first, then bring them back
       navigate(`/login?next=/pricing&plan=${plan.slug}`);
-      return;
-    }
-    if (!plan.configured || !plan.price_id) {
-      setError(`${plan.name} is not yet available — product not configured in Paddle.`);
       return;
     }
     setBusy(plan.slug);
     try {
+      // In DEMO_MODE, or when no Paddle client token is configured, activate
+      // instantly via the demo endpoint. This lets prospects experience the
+      // paid feature set without real payment.
+      if (config.demo_mode || !plan.configured || !plan.price_id) {
+        const token = localStorage.getItem('token');
+        await axios.post(
+          `${API}/api/paddle/demo-activate`,
+          { plan: plan.slug },
+          { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+        );
+        navigate('/billing?welcome=1');
+        return;
+      }
       await openCheckout({
         priceId: plan.price_id,
         customer: { email: user.email },
@@ -65,7 +80,7 @@ export default function PricingPage() {
         },
       });
     } catch (e) {
-      setError(e.message || 'Checkout failed to open');
+      setError(e.response?.data?.detail || e.message || 'Subscription failed');
     } finally {
       setBusy(null);
     }
@@ -106,6 +121,11 @@ export default function PricingPage() {
           <p className="text-lg text-[#8888A0] max-w-2xl mx-auto">
             Start free for 14 days. Cancel anytime. No credit card required to try.
           </p>
+          {config.demo_mode && (
+            <div className="mt-6 inline-flex items-center gap-2 px-4 py-2 rounded-full bg-[#6C63FF]/10 border border-[#6C63FF]/20 text-xs text-[#6C63FF]">
+              <Zap size={12} /> Demo mode active — all plans activate instantly without payment
+            </div>
+          )}
         </div>
 
         {error && (
