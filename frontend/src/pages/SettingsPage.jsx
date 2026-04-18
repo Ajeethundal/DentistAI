@@ -280,18 +280,58 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* Stripe */}
+          {/* Paddle Billing */}
           <div className="flex items-center justify-between p-4 rounded-lg bg-[#0A0A0F]/50">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-[#6C63FF]/10 flex items-center justify-center">
                 <CreditCard size={18} className="text-[#6C63FF]" />
               </div>
               <div>
-                <p className="text-sm font-medium text-[#F0F0F5]">Stripe — Billing</p>
-                <p className="text-xs text-[#8888A0]">Subscription management & payments</p>
+                <p className="text-sm font-medium text-[#F0F0F5]">Paddle — Billing</p>
+                <p className="text-xs text-[#8888A0]">Subscription management & payments ({integrations?.paddle?.environment || 'sandbox'})</p>
               </div>
             </div>
-            <span className="flex items-center gap-1 text-xs text-[#00D4AA]"><Check size={12} /> Active</span>
+            {integrations?.paddle?.configured ? (
+              <span className="flex items-center gap-1 text-xs text-[#00D4AA]"><Check size={12} /> Configured</span>
+            ) : (
+              <span className="text-xs text-[#8888A0]">Not configured</span>
+            )}
+          </div>
+
+          {/* Anthropic (ARIA AI) */}
+          <div className="flex items-center justify-between p-4 rounded-lg bg-[#0A0A0F]/50">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-[#6C63FF]/10 flex items-center justify-center">
+                <Sparkles size={18} className="text-[#6C63FF]" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-[#F0F0F5]">Anthropic Claude — ARIA Brain</p>
+                <p className="text-xs text-[#8888A0]">Powers ARIA's intelligent responses</p>
+              </div>
+            </div>
+            {integrations?.anthropic?.configured ? (
+              <span className="flex items-center gap-1 text-xs text-[#00D4AA]"><Check size={12} /> Connected</span>
+            ) : (
+              <span className="text-xs text-[#FFB347]">API key needed</span>
+            )}
+          </div>
+
+          {/* SendGrid */}
+          <div className="flex items-center justify-between p-4 rounded-lg bg-[#0A0A0F]/50">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-[#FFB347]/10 flex items-center justify-center">
+                <Globe size={18} className="text-[#FFB347]" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-[#F0F0F5]">SendGrid — Email</p>
+                <p className="text-xs text-[#8888A0]">Patient emails & notifications</p>
+              </div>
+            </div>
+            {integrations?.sendgrid?.configured ? (
+              <span className="flex items-center gap-1 text-xs text-[#00D4AA]"><Check size={12} /> Configured</span>
+            ) : (
+              <span className="text-xs text-[#8888A0]">Not configured</span>
+            )}
           </div>
         </div>
       </div>
@@ -305,13 +345,16 @@ export default function SettingsPage() {
             <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#00D4AA]/15 text-[#00D4AA]">{currentPlan} plan active</span>
           )}
         </div>
-        <div className="grid grid-cols-3 gap-4">
-          {plans && Object.entries(plans).map(([key, plan]) => (
-            <div key={key} className={`p-5 rounded-xl border transition-all ${currentPlan === key ? 'border-[#6C63FF] bg-[#6C63FF]/5' : 'border-[rgba(255,255,255,0.07)] hover:border-[#6C63FF]/30'}`}>
-              <h3 className="text-lg font-medium text-[#F0F0F5] font-['Outfit']">{plan.name}</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {plans && plans.map((plan) => (
+            <div key={plan.slug} className={`p-5 rounded-xl border transition-all ${currentPlan === plan.slug ? 'border-[#6C63FF] bg-[#6C63FF]/5' : 'border-[rgba(255,255,255,0.07)] hover:border-[#6C63FF]/30'}`}>
+              <div className="flex items-center gap-2">
+                <h3 className="text-lg font-medium text-[#F0F0F5] font-['Outfit']">{plan.name}</h3>
+                {plan.popular && <span className="px-2 py-0.5 rounded-full text-[10px] bg-[#6C63FF]/15 text-[#6C63FF]">Popular</span>}
+              </div>
               <div className="flex items-end gap-1 my-3">
-                <span className="text-3xl font-light text-[#F0F0F5] font-['Outfit']">${plan.price}</span>
-                <span className="text-sm text-[#8888A0] mb-1">/mo</span>
+                <span className="text-3xl font-light text-[#F0F0F5] font-['Outfit']">{plan.price_display}</span>
+                <span className="text-sm text-[#8888A0] mb-1">/{plan.interval}</span>
               </div>
               <ul className="space-y-2 mb-4">
                 {plan.features.map((f, i) => (
@@ -320,17 +363,15 @@ export default function SettingsPage() {
                   </li>
                 ))}
               </ul>
-              {currentPlan === key ? (
+              {currentPlan === plan.slug ? (
                 <button disabled className="w-full py-2 rounded-lg bg-[#00D4AA]/10 text-[#00D4AA] text-xs font-medium">Current Plan</button>
               ) : (
                 <button
-                  data-testid={`subscribe-${key}`}
-                  onClick={() => handleCheckout(key)}
-                  disabled={checkingOut === key}
-                  className="w-full py-2 rounded-lg bg-[#6C63FF] text-white text-xs font-medium hover:bg-[#6C63FF]/90 transition-all flex items-center justify-center gap-2"
+                  data-testid={`subscribe-${plan.slug}`}
+                  onClick={() => handleCheckout(plan.slug)}
+                  className="w-full py-2 rounded-lg bg-[#6C63FF] text-white text-xs font-medium hover:bg-[#6C63FF]/90 transition-all"
                 >
-                  {checkingOut === key ? <Loader2 size={14} className="animate-spin" /> : null}
-                  {checkingOut === key ? 'Processing...' : 'Subscribe'}
+                  {plan.cta || 'Subscribe'}
                 </button>
               )}
             </div>
