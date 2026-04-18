@@ -986,12 +986,14 @@ async def retell_status(user: dict = Depends(get_current_user)):
 async def send_twilio_message(req: TwilioMessageRequest, user: dict = Depends(_require_starter)):
     """Send a WhatsApp message via Twilio. Gated at Starter tier."""
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
     api_key = os.environ.get("TWILIO_API_KEY", "")
     api_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
     from_number = os.environ.get("TWILIO_WHATSAPP_FROM", "")
-    
+    has_twilio_creds = account_sid and (auth_token or (api_key and api_secret))
+
     from backend.demo_mode import is_demo, generate_mock_inbound_reply
-    if is_demo() or not account_sid or not api_key:
+    if is_demo() or not has_twilio_creds:
         # Demo mode — save outbound, optionally fabricate an inbound reply
         practice_id = user.get("practice_id", "")
         patient = await db.patients.find_one({"phone": req.to_number}, {"_id": 0})
@@ -1044,7 +1046,10 @@ async def send_twilio_message(req: TwilioMessageRequest, user: dict = Depends(_r
     
     try:
         from twilio.rest import Client
-        twilio_client = Client(account_sid, api_key, api_secret)
+        if api_key and api_secret:
+            twilio_client = Client(api_key, api_secret, account_sid=account_sid)
+        else:
+            twilio_client = Client(account_sid, auth_token)
         
         to_whatsapp = f"whatsapp:{req.to_number}" if not req.to_number.startswith("whatsapp:") else req.to_number
         from_whatsapp = f"whatsapp:{from_number}" if not from_number.startswith("whatsapp:") else from_number
@@ -1076,15 +1081,19 @@ async def send_twilio_message(req: TwilioMessageRequest, user: dict = Depends(_r
 async def twilio_status(user: dict = Depends(get_current_user)):
     """Check Twilio connection status"""
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
     api_key = os.environ.get("TWILIO_API_KEY", "")
+    api_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
     if not account_sid:
         return {"connected": False, "message": "Account SID not configured. Add TWILIO_ACCOUNT_SID in settings."}
-    if not api_key:
-        return {"connected": False, "message": "API key not configured"}
+    if not auth_token and not api_key:
+        return {"connected": False, "message": "Auth token or API key not configured"}
     try:
         from twilio.rest import Client
-        api_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
-        twilio_client = Client(account_sid, api_key, api_secret)
+        if api_key and api_secret:
+            twilio_client = Client(api_key, api_secret, account_sid=account_sid)
+        else:
+            twilio_client = Client(account_sid, auth_token)
         account = twilio_client.api.v2010.accounts(account_sid).fetch()
         return {"connected": True, "message": f"Connected: {account.friendly_name}"}
     except Exception as e:

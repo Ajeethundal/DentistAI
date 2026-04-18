@@ -25,7 +25,7 @@ async def chat(
     *,
     system_prompt: str,
     user_message: str,
-    model: str = "claude-sonnet-4-5-20250929",
+    model: str = "",
     max_tokens: int = 1024,
 ) -> str:
     """Return ARIA's reply, or a canned demo reply, or a graceful fallback."""
@@ -49,9 +49,10 @@ async def chat(
         return "ARIA is temporarily unavailable. Please try again shortly."
 
     try:
+        resolved_model = model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
         client = AsyncAnthropic(api_key=key)
         resp = await client.messages.create(
-            model=model,
+            model=resolved_model,
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
