@@ -1695,13 +1695,13 @@ app.include_router(paddle_router)
 # --- CORS ---
 _frontend_url = os.environ.get("FRONTEND_URL", "") or os.environ.get("CORS_ORIGINS", "http://localhost:3000")
 _allowed_origins = [o.strip() for o in _frontend_url.split(",") if o.strip()]
-# Safety: never fall back to "*" with allow_credentials=True
 if not _allowed_origins:
     _allowed_origins = ["http://localhost:3000"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
