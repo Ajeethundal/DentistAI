@@ -4,7 +4,7 @@ import axios from 'axios';
 import { CreditCard, Check, AlertCircle, Loader2, ExternalLink } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 
-const API = process.env.REACT_APP_BACKEND_URL;
+const API = process.env.REACT_APP_BACKEND_URL || '';
 
 const authHeaders = () => {
   const t = localStorage.getItem('token');

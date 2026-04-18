@@ -5,7 +5,7 @@ import { Check, Sparkles, Loader2, ArrowLeft, Zap } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { openCheckout } from '@/lib/paddle';
 
-const API = process.env.REACT_APP_BACKEND_URL;
+const API = process.env.REACT_APP_BACKEND_URL || '';
 
 export default function PricingPage() {
   const { user } = useAuth();
