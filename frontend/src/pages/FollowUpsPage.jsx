@@ -35,6 +35,30 @@ export default function FollowUpsPage() {
 
   const getInitials = (name) => name?.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2) || '?';
 
+  if (loading) return (
+    <div className="p-6 space-y-6">
+      <div className="h-8 w-48 bg-[#1A1A24] rounded-lg animate-pulse" />
+      {[1,2,3].map(i => (
+        <div key={i} className="bg-[#111118] border border-[rgba(255,255,255,0.07)] rounded-xl p-5">
+          <div className="h-5 w-40 bg-[#1A1A24] rounded animate-pulse mb-4" />
+          {[1,2,3].map(j => (
+            <div key={j} className="flex items-center gap-4 py-3 border-b border-[rgba(255,255,255,0.05)] last:border-0">
+              <div className="w-10 h-10 rounded-full bg-[#1A1A24] animate-pulse" />
+              <div className="flex-1 space-y-2">
+                <div className="h-4 w-32 bg-[#1A1A24] rounded animate-pulse" />
+                <div className="h-3 w-48 bg-[#1A1A24] rounded animate-pulse" />
+              </div>
+              <div className="flex gap-2">
+                <div className="h-8 w-16 bg-[#1A1A24] rounded-lg animate-pulse" />
+                <div className="h-8 w-16 bg-[#1A1A24] rounded-lg animate-pulse" />
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+
   return (
     <div data-testid="follow-ups-page" className="p-6 space-y-6">
       <div className="flex items-center justify-between">

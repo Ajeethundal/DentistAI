@@ -16,7 +16,15 @@ All of the following keys were exposed in chat and should be rotated immediately
 
 **After rotating**: update `backend/.env` with new values. No code changes needed.
 
-## Backend deploy (blocked on user)
+## Vercel env var update (DO THIS NOW)
+
+The backend is live at `http://dentistai-prod.eba-smrjzmvw.ap-south-1.elasticbeanstalk.com`.
+
+1. Go to Vercel → `0-ai00` project → Settings → Environment Variables
+2. Set `REACT_APP_BACKEND_URL` = `http://dentistai-prod.eba-smrjzmvw.ap-south-1.elasticbeanstalk.com`
+3. Trigger a redeploy
+
+## Backend deploy (DONE)
 
 - AWS CLI + EB CLI not confirmed installed. See `deploy/AWS_DEPLOY.md`.
 - MongoDB Atlas cluster needs to be verified accessible from deploy target.

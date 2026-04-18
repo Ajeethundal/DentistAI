@@ -233,9 +233,9 @@ export default function LandingPage() {
                 >
                   <Link
                     to="/pricing"
-                    className="inline-flex items-center gap-2 bg-[#6C63FF] text-white px-6 py-3.5 rounded-xl font-medium hover:bg-[#5B54E6] shadow-[0_0_30px_rgba(108,99,255,0.3)] hover:shadow-[0_0_50px_rgba(108,99,255,0.5)] transition-all duration-300"
+                    className="group relative inline-flex items-center gap-2 bg-[#6C63FF] text-white px-6 py-3.5 rounded-xl font-medium hover:bg-[#5B54E6] shadow-[0_0_30px_rgba(108,99,255,0.3)] hover:shadow-[0_0_50px_rgba(108,99,255,0.5)] transition-all duration-300"
                   >
-                    Start free trial <ArrowRight size={16} />
+                    Start free trial <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
                   </Link>
                   <button className="inline-flex items-center gap-2 bg-white/5 text-[#F0F0F5] px-6 py-3.5 rounded-xl font-medium hover:bg-white/10 border border-[rgba(255,255,255,0.07)] transition-all duration-300">
                     <Play size={16} className="text-[#6C63FF]" /> Watch demo
@@ -277,6 +277,10 @@ export default function LandingPage() {
                     <div className="w-3 h-3 rounded-full bg-[#FFBD2E]" />
                     <div className="w-3 h-3 rounded-full bg-[#28C840]" />
                     <span className="ml-3 text-xs text-[#8888A0]">DentistAI Dashboard</span>
+                    <span className="ml-auto flex items-center gap-1.5 text-[10px] text-[#00D4AA]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#00D4AA] animate-pulse" />
+                      LIVE
+                    </span>
                   </div>
 
                   {/* Stats row */}
@@ -365,6 +369,19 @@ export default function LandingPage() {
           </motion.div>
         </section>
 
+        {/* ═══════════════════════ TRUSTED BY ═══════════════════════ */}
+        <FadeUp className="py-12 border-b border-[rgba(255,255,255,0.05)]">
+          <div className="max-w-5xl mx-auto px-6 text-center">
+            {/* PLACEHOLDER — replace with real practice logos */}
+            <p className="text-xs uppercase tracking-widest text-[#8888A0] mb-6">Trusted by leading dental practices</p>
+            <div className="flex flex-wrap items-center justify-center gap-x-12 gap-y-6 opacity-40">
+              {['SmileCare Dental', 'Bright Smile Studio', 'Premier Dental Group', 'CityView Dentistry', 'Lakeside Family Dental'].map(name => (
+                <span key={name} className="text-lg font-['Outfit'] font-light text-[#8888A0] tracking-tight">{name}</span>
+              ))}
+            </div>
+          </div>
+        </FadeUp>
+
         {/* ═══════════════════════ 3. METRICS BAR ═══════════════════════ */}
         <section className="border-y border-[rgba(255,255,255,0.07)] bg-[#111118]/50 backdrop-blur-sm">
           <div className="max-w-6xl mx-auto px-6 py-8">
@@ -373,6 +390,44 @@ export default function LandingPage() {
               <Metric icon={TrendingUp} value={98} suffix="%" label="Booking rate" />
               <Metric icon={Clock} value={24} suffix="/7" label="Availability" />
               <Metric icon={Zap} value={2} suffix=" min" label="Avg response" />
+            </div>
+          </div>
+        </section>
+
+        {/* ═══════════════════════ HOW IT WORKS ═══════════════════════ */}
+        <section className="py-24 md:py-32 relative">
+          <div className="absolute inset-0 bg-gradient-to-b from-transparent via-[#6C63FF]/[0.03] to-transparent pointer-events-none" />
+          <div className="max-w-5xl mx-auto px-6 relative">
+            <FadeUp>
+              <div className="text-center mb-16">
+                <span className="text-xs uppercase tracking-widest text-[#6C63FF] font-medium mb-4 block">How it works</span>
+                <h2 className="text-3xl md:text-5xl font-light font-['Outfit'] tracking-tight">
+                  Live in <span className="text-[#8888A0]">three steps.</span>
+                </h2>
+              </div>
+            </FadeUp>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+              {[
+                { step: '01', title: 'Connect your practice', desc: 'Add your phone number, office hours, and services. ARIA learns your practice in minutes.', icon: Globe },
+                { step: '02', title: 'ARIA starts answering', desc: 'Every call gets picked up. Every WhatsApp gets replied. Appointments book automatically.', icon: Headphones },
+                { step: '03', title: 'Watch your practice grow', desc: 'Track calls, bookings, and revenue from your dashboard. See the ROI in real-time.', icon: TrendingUp },
+              ].map((item, i) => (
+                <FadeUp key={i} delay={i * 0.15}>
+                  <div className="relative group">
+                    <div className="bg-[#111118] border border-[rgba(255,255,255,0.07)] rounded-2xl p-8 h-full transition-all duration-300 hover:border-[#6C63FF]/30 hover:-translate-y-2 hover:shadow-[0_20px_40px_rgba(108,99,255,0.1)]">
+                      <div className="text-5xl font-light font-['Outfit'] text-[#6C63FF]/20 mb-4">{item.step}</div>
+                      <div className="w-12 h-12 rounded-2xl bg-[#6C63FF]/10 flex items-center justify-center mb-5">
+                        <item.icon size={22} className="text-[#6C63FF]" />
+                      </div>
+                      <h3 className="text-lg font-medium font-['Outfit'] text-[#F0F0F5] mb-3">{item.title}</h3>
+                      <p className="text-sm text-[#8888A0] leading-relaxed">{item.desc}</p>
+                    </div>
+                    {i < 2 && (
+                      <div className="hidden md:block absolute top-1/2 -right-4 w-8 h-px bg-gradient-to-r from-[#6C63FF]/30 to-transparent" />
+                    )}
+                  </div>
+                </FadeUp>
+              ))}
             </div>
           </div>
         </section>

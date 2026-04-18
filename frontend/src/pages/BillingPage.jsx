@@ -62,8 +62,19 @@ export default function BillingPage() {
 
   if (loading) {
     return (
-      <div className="flex justify-center py-20">
-        <Loader2 className="animate-spin text-[#6C63FF]" size={32} />
+      <div className="p-6 max-w-4xl space-y-6">
+        <div className="h-8 w-48 bg-[#1A1A24] rounded-lg animate-pulse" />
+        <div className="bg-[#111118] border border-[rgba(255,255,255,0.07)] rounded-xl p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="h-6 w-32 bg-[#1A1A24] rounded animate-pulse" />
+            <div className="h-6 w-20 bg-[#1A1A24] rounded-full animate-pulse" />
+          </div>
+          <div className="h-4 w-64 bg-[#1A1A24] rounded animate-pulse" />
+          <div className="flex gap-3 mt-4">
+            <div className="h-10 w-32 bg-[#1A1A24] rounded-lg animate-pulse" />
+            <div className="h-10 w-32 bg-[#1A1A24] rounded-lg animate-pulse" />
+          </div>
+        </div>
       </div>
     );
   }

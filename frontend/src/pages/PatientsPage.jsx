@@ -17,12 +17,14 @@ export default function PatientsPage() {
   const [activeTab, setActiveTab] = useState('overview');
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: '', phone: '', email: '', notes: '' });
+  const [loading, setLoading] = useState(true);
 
   const loadPatients = async () => {
     try {
       const { data } = await api.get('/patients', { params: search ? { search } : {} });
       setPatients(data);
     } catch (err) { console.error(err); }
+    finally { setLoading(false); }
   };
 
   useEffect(() => { loadPatients(); }, [search]);
@@ -47,6 +49,27 @@ export default function PatientsPage() {
   };
 
   const getInitials = (name) => name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+
+  if (loading) return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="h-8 w-64 bg-[#1A1A24] rounded-lg animate-pulse" />
+        <div className="h-9 w-32 bg-[#1A1A24] rounded-lg animate-pulse" />
+      </div>
+      <div className="bg-[#111118] border border-[rgba(255,255,255,0.07)] rounded-xl">
+        {Array.from({length: 8}).map((_, i) => (
+          <div key={i} className="flex items-center gap-4 p-4 border-b border-[rgba(255,255,255,0.05)]">
+            <div className="w-10 h-10 rounded-full bg-[#1A1A24] animate-pulse" />
+            <div className="flex-1 space-y-2">
+              <div className="h-4 w-32 bg-[#1A1A24] rounded animate-pulse" />
+              <div className="h-3 w-24 bg-[#1A1A24] rounded animate-pulse" />
+            </div>
+            <div className="h-6 w-16 bg-[#1A1A24] rounded-full animate-pulse" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <div data-testid="patients-page" className="p-6 flex gap-6 h-[calc(100vh-40px)]">
