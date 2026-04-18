@@ -253,10 +253,10 @@ export default function LandingPage() {
 
               {/* Right — 3D floating dashboard mockup */}
               <motion.div
-                initial={{ opacity: 0, x: 60 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.9, delay: 0.3 }}
-                className="relative hidden lg:block"
+                initial={{ opacity: 0, y: 40 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.9, delay: 0.4 }}
+                className="relative"
               >
                 {/* Glow behind 3D card */}
                 <div className="absolute inset-0 -z-10">
@@ -268,8 +268,8 @@ export default function LandingPage() {
                 <motion.div
                   whileHover={{ rotateY: 0, rotateX: 0, scale: 1.02 }}
                   transition={{ type: 'spring', stiffness: 200, damping: 20 }}
-                  style={{ transform: 'perspective(1200px) rotateY(-15deg) rotateX(5deg)', transformStyle: 'preserve-3d' }}
-                  className="relative bg-[#111118]/90 backdrop-blur-xl border border-[rgba(255,255,255,0.1)] rounded-2xl p-6 shadow-2xl"
+                  style={{ transformStyle: 'preserve-3d' }}
+                  className="relative bg-[#111118]/90 backdrop-blur-xl border border-[rgba(255,255,255,0.1)] rounded-2xl p-6 shadow-2xl md:[transform:perspective(1200px)_rotateY(-15deg)_rotateX(5deg)]"
                 >
                   {/* Dashboard header */}
                   <div className="flex items-center gap-2 mb-5">
@@ -321,7 +321,7 @@ export default function LandingPage() {
                 <motion.div
                   animate={{ y: [0, -20, 0] }}
                   transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
-                  className="absolute -top-6 -right-4 bg-[#111118]/80 backdrop-blur-xl border border-[rgba(255,255,255,0.1)] rounded-2xl p-3 shadow-lg"
+                  className="absolute -top-6 -right-4 bg-[#111118]/80 backdrop-blur-xl border border-[rgba(255,255,255,0.1)] rounded-2xl p-3 shadow-lg hidden md:block"
                   style={{ transform: 'translateZ(60px)' }}
                 >
                   <div className="flex items-center gap-2">
@@ -339,7 +339,7 @@ export default function LandingPage() {
                 <motion.div
                   animate={{ y: [0, -15, 0] }}
                   transition={{ duration: 5, repeat: Infinity, ease: 'easeInOut', delay: 1 }}
-                  className="absolute -bottom-4 -left-6 bg-[#111118]/80 backdrop-blur-xl border border-[rgba(255,255,255,0.1)] rounded-2xl p-3 shadow-lg"
+                  className="absolute -bottom-4 -left-6 bg-[#111118]/80 backdrop-blur-xl border border-[rgba(255,255,255,0.1)] rounded-2xl p-3 shadow-lg hidden md:block"
                   style={{ transform: 'translateZ(40px)' }}
                 >
                   <div className="flex items-center gap-2">
@@ -357,7 +357,7 @@ export default function LandingPage() {
                 <motion.div
                   animate={{ y: [0, -12, 0] }}
                   transition={{ duration: 3.5, repeat: Infinity, ease: 'easeInOut', delay: 0.5 }}
-                  className="absolute top-1/2 -right-10 bg-[#00D4AA]/10 backdrop-blur-xl border border-[#00D4AA]/20 rounded-full px-3 py-1.5 shadow-lg"
+                  className="absolute top-1/2 -right-10 bg-[#00D4AA]/10 backdrop-blur-xl border border-[#00D4AA]/20 rounded-full px-3 py-1.5 shadow-lg hidden lg:block"
                 >
                   <div className="flex items-center gap-1.5">
                     <Check size={12} className="text-[#00D4AA]" />
