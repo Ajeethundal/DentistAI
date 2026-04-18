@@ -23,7 +23,7 @@ export default function SettingsPage() {
         const [settingsRes, intRes, plansRes] = await Promise.all([
           api.get('/settings'),
           api.get('/integrations/status'),
-          api.get('/billing/plans')
+          api.get('/paddle/plans')
         ]);
         setSettings(settingsRes.data);
         setIntegrations(intRes.data);
@@ -38,29 +38,7 @@ export default function SettingsPage() {
     } else if (searchParams.get('google_error')) {
       setGoogleMsg(`Google Calendar error: ${searchParams.get('google_error')}`);
     }
-
-    // Check for Stripe callback
-    const sessionId = searchParams.get('session_id');
-    if (sessionId) {
-      pollPaymentStatus(sessionId);
-    }
   }, []);
-
-  const pollPaymentStatus = async (sessionId, attempts = 0) => {
-    if (attempts >= 5) return;
-    try {
-      const { data } = await api.get(`/billing/status/${sessionId}`);
-      if (data.payment_status === 'paid') {
-        setGoogleMsg('Payment successful! Your subscription is now active.');
-        const intRes = await api.get('/integrations/status');
-        setIntegrations(intRes.data);
-      } else if (data.status === 'expired') {
-        setGoogleMsg('Payment session expired. Please try again.');
-      } else {
-        setTimeout(() => pollPaymentStatus(sessionId, attempts + 1), 2000);
-      }
-    } catch (err) { console.error(err); }
-  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -92,16 +70,8 @@ export default function SettingsPage() {
     } catch (err) { setGoogleMsg('Sync failed'); }
   };
 
-  const handleCheckout = async (planId) => {
-    setCheckingOut(planId);
-    try {
-      const { data } = await api.post('/billing/checkout', {
-        plan: planId,
-        origin_url: window.location.origin
-      });
-      if (data.url) window.location.href = data.url;
-    } catch (err) { console.error(err); }
-    finally { setCheckingOut(null); }
+  const handleCheckout = (planSlug) => {
+    window.location.href = '/pricing';
   };
 
   const checkRetell = async () => {

@@ -1,213 +1,415 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useApi } from '@/context/AuthContext';
-import { Search, Send, Sparkles, User, MessageSquare } from 'lucide-react';
+import { useToast } from '@/components/Toast';
+import {
+  Search, Send, User, MessageSquare, Phone, Clock,
+  CheckCheck, ArrowLeft, Bot, MoreVertical, Loader2,
+} from 'lucide-react';
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+function relativeTime(dateString) {
+  if (!dateString) return '';
+  const now = new Date();
+  const date = new Date(dateString);
+  const diffMs = now - date;
+  const diffSec = Math.floor(diffMs / 1000);
+  const diffMin = Math.floor(diffSec / 60);
+  const diffHr = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHr / 24);
+
+  if (diffSec < 60) return 'Just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  if (diffDay === 1) return 'Yesterday';
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return date.toLocaleDateString();
+}
+
+function initials(name) {
+  if (!name) return '??';
+  return name
+    .split(' ')
+    .map((w) => w[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Skeleton components                                                */
+/* ------------------------------------------------------------------ */
+
+function ConversationSkeleton() {
+  return (
+    <>
+      {[...Array(6)].map((_, i) => (
+        <div key={i} className="flex items-center gap-3 px-4 py-3 border-b border-white/5 animate-pulse">
+          <div className="w-10 h-10 rounded-full bg-white/10 shrink-0" />
+          <div className="flex-1 space-y-2">
+            <div className="flex justify-between">
+              <div className="h-3 w-24 bg-white/10 rounded" />
+              <div className="h-3 w-10 bg-white/10 rounded" />
+            </div>
+            <div className="h-3 w-40 bg-white/10 rounded" />
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function MessageSkeleton() {
+  return (
+    <div className="space-y-3 p-4 animate-pulse">
+      {[...Array(5)].map((_, i) => {
+        const isLeft = i % 2 === 0;
+        return (
+          <div key={i} className={`flex ${isLeft ? 'justify-start' : 'justify-end'}`}>
+            <div className={`rounded-2xl px-4 py-3 space-y-2 ${isLeft ? 'bg-white/5 w-[60%]' : 'bg-white/5 w-[50%]'}`}>
+              <div className="h-3 w-full bg-white/10 rounded" />
+              <div className="h-3 w-3/4 bg-white/10 rounded" />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Message bubble styling by sender                                   */
+/* ------------------------------------------------------------------ */
+
+function senderStyle(sender) {
+  switch (sender) {
+    case 'aria':
+      return {
+        align: 'justify-start',
+        bubble: 'bg-[#1A1A24] rounded-tl-sm border border-white/5',
+        label: 'ARIA',
+        labelColor: 'text-[#6C63FF]',
+        Icon: Bot,
+      };
+    case 'doctor':
+      return {
+        align: 'justify-start',
+        bubble: 'bg-[#1A1A24] rounded-tl-sm border border-[#00D4AA]/20',
+        label: 'Doctor',
+        labelColor: 'text-[#00D4AA]',
+        Icon: User,
+      };
+    case 'patient':
+    default:
+      return {
+        align: 'justify-end',
+        bubble: 'bg-[#00D4AA]/20 rounded-tr-sm border border-[#00D4AA]/10',
+        label: null,
+        labelColor: '',
+        Icon: null,
+      };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main component                                                     */
+/* ------------------------------------------------------------------ */
 
 export default function WhatsAppPage() {
   const api = useApi();
+  const toast = useToast();
+
+  // Data state
   const [conversations, setConversations] = useState([]);
-  const [activeConv, setActiveConv] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
+  const [selected, setSelected] = useState(null);
+
+  // UI state
   const [searchTerm, setSearchTerm] = useState('');
-  const messagesEndRef = useRef(null);
+  const [message, setMessage] = useState('');
+  const [mobileView, setMobileView] = useState('list');
+  const [loadingConvos, setLoadingConvos] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sending, setSending] = useState(false);
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const { data } = await api.get('/messages/conversations');
-        setConversations(data);
-        if (data.length > 0 && !activeConv) setActiveConv(data[0]);
-      } catch (err) { console.error(err); }
-    };
-    load();
-  }, []);
+  const messagesEnd = useRef(null);
 
-  useEffect(() => {
-    if (!activeConv) return;
-    const loadMessages = async () => {
-      try {
-        const { data } = await api.get(`/messages/${activeConv.patient_id}`);
-        setMessages(data);
-      } catch (err) { console.error(err); }
-    };
-    loadMessages();
-  }, [activeConv]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const sendMessage = async () => {
-    if (!newMessage.trim() || !activeConv) return;
+  // ---- Fetch conversations ----
+  const fetchConversations = useCallback(async () => {
     try {
-      await api.post('/messages/send', { patient_id: activeConv.patient_id, body: newMessage });
-      setMessages(prev => [...prev, { direction: 'outbound', body: newMessage, sender: 'doctor', created_at: new Date().toISOString() }]);
-      setNewMessage('');
-    } catch (err) { console.error(err); }
-  };
+      setLoadingConvos(true);
+      const { data } = await api.get('/messages/conversations');
+      setConversations(data);
+    } catch (err) {
+      toast.error('Failed to load conversations');
+      console.error(err);
+    } finally {
+      setLoadingConvos(false);
+    }
+  }, [api, toast]);
 
-  const templates = [
-    "Appointment confirmed for your upcoming visit.",
-    "Reminder: your appointment is tomorrow.",
-    "We missed you today. Would you like to reschedule?",
-    "Your appointment has been rescheduled."
-  ];
+  useEffect(() => {
+    fetchConversations();
+  }, [fetchConversations]);
 
-  const getInitials = (name) => name?.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2) || '?';
-
-  const filteredConversations = conversations.filter(c =>
-    c.patient_name?.toLowerCase().includes(searchTerm.toLowerCase())
+  // ---- Fetch messages for selected conversation ----
+  const fetchMessages = useCallback(
+    async (patientId) => {
+      try {
+        setLoadingMessages(true);
+        const { data } = await api.get(`/messages/${patientId}`);
+        setMessages(data);
+      } catch (err) {
+        toast.error('Failed to load messages');
+        console.error(err);
+      } finally {
+        setLoadingMessages(false);
+      }
+    },
+    [api, toast]
   );
 
+  useEffect(() => {
+    if (selected) {
+      fetchMessages(selected.patient_id);
+    } else {
+      setMessages([]);
+    }
+  }, [selected, fetchMessages]);
+
+  // ---- Auto-scroll to bottom ----
+  useEffect(() => {
+    messagesEnd.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages.length]);
+
+  // ---- Select conversation ----
+  const selectConversation = (conv) => {
+    setSelected(conv);
+    setMobileView('chat');
+  };
+
+  // ---- Send message ----
+  const handleSend = async () => {
+    if (!message.trim() || !selected || sending) return;
+    const body = message.trim();
+    setMessage('');
+    setSending(true);
+    try {
+      const { data: sentMsg } = await api.post('/messages/send', {
+        patient_id: selected.patient_id,
+        body,
+      });
+      setMessages((prev) => [...prev, sentMsg]);
+      // Update last message in conversation list
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.patient_id === selected.patient_id
+            ? { ...c, last_message: body, last_time: sentMsg.created_at }
+            : c
+        )
+      );
+    } catch (err) {
+      toast.error('Failed to send message');
+      console.error(err);
+      // Restore the message so user doesn't lose it
+      setMessage(body);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  // ---- Filter conversations by search ----
+  const filtered = conversations.filter(
+    (c) =>
+      c.patient_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.phone?.includes(searchTerm)
+  );
+
+  // ---- Style tokens ----
+  const border = 'border-[rgba(255,255,255,0.07)]';
+  const cardBg = 'bg-[#111118]';
+  const pageBg = 'bg-[#0A0A0F]';
+
   return (
-    <div data-testid="whatsapp-page" className="flex h-[calc(100vh-40px)]">
-      {/* Conversations Sidebar */}
-      <div className="w-80 border-r border-[rgba(255,255,255,0.07)] flex flex-col bg-[#111118]">
-        <div className="p-4 border-b border-[rgba(255,255,255,0.07)]">
-          <h2 className="text-lg font-medium text-[#F0F0F5] font-['Outfit'] mb-3">WhatsApp</h2>
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8888A0]" />
-            <input
-              data-testid="whatsapp-search"
-              value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
-              placeholder="Search conversations..."
-              className="w-full bg-[#0A0A0F] border border-[rgba(255,255,255,0.07)] text-[#F0F0F5] rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-[#6C63FF]"
-            />
+    <div className="p-4 md:p-6">
+      <div className={`h-[calc(100vh-8rem)] flex rounded-xl border ${border} overflow-hidden ${cardBg}`}>
+
+        {/* ============ Conversation List ============ */}
+        <div
+          className={`w-full sm:w-80 lg:w-96 border-r ${border} flex flex-col ${
+            mobileView === 'chat' ? 'hidden sm:flex' : 'flex'
+          }`}
+        >
+          {/* Header + search */}
+          <div className={`p-4 border-b ${border}`}>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-[#00D4AA]" />
+                WhatsApp
+              </h2>
+            </div>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+              <input
+                type="text"
+                placeholder="Search patients..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className={`w-full pl-9 pr-4 py-2 ${pageBg} border ${border} rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#6C63FF] focus:border-transparent`}
+              />
+            </div>
+          </div>
+
+          {/* List */}
+          <div className="flex-1 overflow-y-auto">
+            {loadingConvos ? (
+              <ConversationSkeleton />
+            ) : filtered.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-gray-500 px-4">
+                <MessageSquare className="w-10 h-10 mb-2 text-gray-600" />
+                <p className="text-sm font-medium text-white">No conversations yet</p>
+                <p className="text-xs text-center mt-1">
+                  {searchTerm ? 'No results match your search' : 'Conversations will appear here when patients message you'}
+                </p>
+              </div>
+            ) : (
+              filtered.map((conv) => (
+                <div
+                  key={conv.patient_id}
+                  onClick={() => selectConversation(conv)}
+                  className={`flex items-center gap-3 px-4 py-3 cursor-pointer border-b border-white/5 transition-colors ${
+                    selected?.patient_id === conv.patient_id
+                      ? 'bg-[#6C63FF]/10 border-l-2 border-l-[#6C63FF]'
+                      : 'hover:bg-white/5'
+                  }`}
+                >
+                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#00D4AA] to-[#00B894] flex items-center justify-center text-white text-sm font-bold shrink-0">
+                    {initials(conv.patient_name)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-semibold text-white">{conv.patient_name}</span>
+                      <span className="text-[10px] text-gray-500">{relativeTime(conv.last_time)}</span>
+                    </div>
+                    <div className="flex items-center justify-between mt-0.5">
+                      <span className="text-xs text-gray-400 truncate pr-2">{conv.last_message}</span>
+                      {conv.unread > 0 && (
+                        <span className="w-5 h-5 rounded-full bg-[#00D4AA] text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                          {conv.unread}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto chat-scroll">
-          {filteredConversations.map((conv) => (
-            <div
-              key={conv.patient_id}
-              data-testid={`conversation-${conv.patient_id}`}
-              onClick={() => setActiveConv(conv)}
-              className={`flex items-center gap-3 px-4 py-3 cursor-pointer border-b border-[rgba(255,255,255,0.04)] transition-all ${activeConv?.patient_id === conv.patient_id ? 'bg-[#6C63FF]/10' : 'hover:bg-[rgba(255,255,255,0.03)]'}`}
-            >
-              <div className="relative flex-shrink-0">
-                <div className="w-10 h-10 rounded-full bg-[#6C63FF]/15 flex items-center justify-center">
-                  <span className="text-xs font-medium text-[#6C63FF]">{getInitials(conv.patient_name)}</span>
+
+        {/* ============ Chat Area ============ */}
+        <div className={`flex-1 flex flex-col ${mobileView === 'list' ? 'hidden sm:flex' : 'flex'}`}>
+          {selected ? (
+            <>
+              {/* Chat header */}
+              <div className={`flex items-center gap-3 px-4 py-3 border-b ${border} ${cardBg}`}>
+                <button className="sm:hidden" onClick={() => setMobileView('list')}>
+                  <ArrowLeft className="w-5 h-5 text-gray-400" />
+                </button>
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#00D4AA] to-[#00B894] flex items-center justify-center text-white text-sm font-bold">
+                  {initials(selected.patient_name)}
                 </div>
-                {conv.aria_handling && (
-                  <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-[#6C63FF] flex items-center justify-center border-2 border-[#111118]">
-                    <Sparkles size={8} className="text-white" />
+                <div className="flex-1">
+                  <div className="text-sm font-semibold text-white">{selected.patient_name}</div>
+                  <div className="text-xs text-gray-500">{selected.phone}</div>
+                </div>
+                {selected.aria_handling && (
+                  <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-[#00D4AA]/10 border border-[#00D4AA]/20">
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#00D4AA] animate-pulse" />
+                    <span className="text-[10px] font-semibold text-[#00D4AA]">ARIA active</span>
                   </div>
                 )}
+                <button className="p-2 hover:bg-white/5 rounded-lg transition-colors">
+                  <Phone className="w-4 h-4 text-gray-400" />
+                </button>
+                <button className="p-2 hover:bg-white/5 rounded-lg transition-colors">
+                  <MoreVertical className="w-4 h-4 text-gray-400" />
+                </button>
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-[#F0F0F5] truncate">{conv.patient_name}</span>
-                  <span className="text-[10px] text-[#8888A0] flex-shrink-0">
-                    {new Date(conv.last_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between mt-0.5">
-                  <p className="text-xs text-[#8888A0] truncate">{conv.last_message}</p>
-                  {conv.unread > 0 && (
-                    <span className="ml-2 w-5 h-5 rounded-full bg-[#00D4AA] flex items-center justify-center text-[10px] text-white font-medium flex-shrink-0">
-                      {conv.unread}
-                    </span>
+
+              {/* Messages */}
+              <div className={`flex-1 overflow-y-auto p-4 ${pageBg} space-y-3`}>
+                {loadingMessages ? (
+                  <MessageSkeleton />
+                ) : messages.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                    <MessageSquare className="w-10 h-10 mb-2 text-gray-600" />
+                    <p className="text-sm text-white font-medium">No messages yet</p>
+                    <p className="text-xs mt-1">Send a message to start the conversation</p>
+                  </div>
+                ) : (
+                  messages.map((msg) => {
+                    const style = senderStyle(msg.sender);
+                    return (
+                      <div key={msg.id} className={`flex ${style.align}`}>
+                        <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 shadow-sm ${style.bubble}`}>
+                          {style.label && (
+                            <div className="flex items-center gap-1 mb-1">
+                              <style.Icon className={`w-3 h-3 ${style.labelColor}`} />
+                              <span className={`text-[10px] font-semibold ${style.labelColor}`}>{style.label}</span>
+                            </div>
+                          )}
+                          <p className="text-sm text-gray-200 whitespace-pre-line">{msg.body}</p>
+                          <div className="flex items-center justify-end gap-1 mt-1">
+                            <span className="text-[10px] text-gray-500">{relativeTime(msg.created_at)}</span>
+                            {msg.direction === 'outbound' && (
+                              <CheckCheck className={`w-3 h-3 ${msg.read ? 'text-[#6C63FF]' : 'text-gray-500'}`} />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={messagesEnd} />
+              </div>
+
+              {/* Message input */}
+              <div className={`flex items-center gap-2 px-4 py-3 ${cardBg} border-t ${border}`}>
+                <input
+                  type="text"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+                  placeholder="Type a message..."
+                  disabled={sending}
+                  className={`flex-1 px-4 py-2 ${pageBg} rounded-full text-sm text-white placeholder-gray-500 border ${border} focus:outline-none focus:ring-2 focus:ring-[#6C63FF] focus:border-transparent disabled:opacity-50`}
+                />
+                <button
+                  onClick={handleSend}
+                  disabled={!message.trim() || sending}
+                  className="w-10 h-10 bg-[#00D4AA] hover:bg-[#00C4A0] disabled:bg-gray-700 rounded-full flex items-center justify-center transition-colors"
+                >
+                  {sending ? (
+                    <Loader2 className="w-4 h-4 text-white animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4 text-white" />
                   )}
-                </div>
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-gray-500">
+              <div className="text-center">
+                <MessageSquare className="w-12 h-12 mx-auto mb-3 text-gray-600" />
+                <p className="font-medium text-white">Select a conversation</p>
+                <p className="text-sm">Choose a patient to view their WhatsApp messages</p>
               </div>
             </div>
-          ))}
+          )}
         </div>
       </div>
-
-      {/* Chat View */}
-      {activeConv ? (
-        <div className="flex-1 flex flex-col">
-          {/* Chat Header */}
-          <div className="flex items-center gap-3 px-6 py-4 border-b border-[rgba(255,255,255,0.07)] bg-[#111118]/50 backdrop-blur-sm">
-            <div className="w-10 h-10 rounded-full bg-[#6C63FF]/15 flex items-center justify-center">
-              <span className="text-xs font-medium text-[#6C63FF]">{getInitials(activeConv.patient_name)}</span>
-            </div>
-            <div>
-              <h3 className="text-sm font-medium text-[#F0F0F5]">{activeConv.patient_name}</h3>
-              <p className="text-xs text-[#8888A0]">{activeConv.phone}</p>
-            </div>
-            <div className="ml-auto flex items-center gap-2">
-              <span className="text-[10px] text-[#6C63FF] bg-[#6C63FF]/10 px-2 py-1 rounded-full">ARIA auto-reply: ON</span>
-            </div>
-          </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-3 chat-scroll" data-testid="whatsapp-messages">
-            {messages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'} animate-slide-up`} style={{ animationDelay: `${i * 30}ms` }}>
-                <div className={`max-w-[65%] p-3 rounded-2xl text-sm ${
-                  msg.direction === 'outbound'
-                    ? msg.sender === 'aria'
-                      ? 'bg-[#6C63FF]/15 border border-[#6C63FF]/30 rounded-tr-sm'
-                      : 'bg-[#111118] border border-[rgba(255,255,255,0.07)] rounded-tr-sm'
-                    : 'bg-[#0A0A0F] border border-[rgba(255,255,255,0.07)] rounded-tl-sm'
-                }`}>
-                  {msg.sender === 'aria' && msg.direction === 'outbound' && (
-                    <div className="flex items-center gap-1 mb-1">
-                      <Sparkles size={10} className="text-[#6C63FF]" />
-                      <span className="text-[10px] text-[#6C63FF] font-medium">ARIA</span>
-                    </div>
-                  )}
-                  {msg.sender === 'doctor' && msg.direction === 'outbound' && (
-                    <div className="flex items-center gap-1 mb-1">
-                      <User size={10} className="text-[#00D4AA]" />
-                      <span className="text-[10px] text-[#00D4AA] font-medium">Dr.</span>
-                    </div>
-                  )}
-                  <p className="text-[#F0F0F5] leading-relaxed">{msg.body}</p>
-                  <p className="text-[10px] text-[#8888A0] mt-1.5 text-right">
-                    {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </p>
-                </div>
-              </div>
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Templates */}
-          <div className="px-6 py-2 border-t border-[rgba(255,255,255,0.07)] flex gap-2 overflow-x-auto">
-            {templates.map((t, i) => (
-              <button
-                key={i}
-                data-testid={`template-${i}`}
-                onClick={() => setNewMessage(t)}
-                className="flex-shrink-0 px-3 py-1.5 rounded-full text-[10px] bg-[#111118] border border-[rgba(255,255,255,0.07)] text-[#8888A0] hover:text-[#F0F0F5] hover:border-[#6C63FF]/30 transition-all"
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-
-          {/* Input */}
-          <div className="px-6 py-4 border-t border-[rgba(255,255,255,0.07)]">
-            <div className="flex items-center gap-3">
-              <input
-                data-testid="whatsapp-message-input"
-                value={newMessage}
-                onChange={e => setNewMessage(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && sendMessage()}
-                placeholder="Type a message..."
-                className="flex-1 bg-[#111118] border border-[rgba(255,255,255,0.07)] text-[#F0F0F5] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#6C63FF] transition-all"
-              />
-              <button
-                data-testid="whatsapp-send-btn"
-                onClick={sendMessage}
-                className="p-3 rounded-xl bg-[#6C63FF] text-white hover:bg-[#6C63FF]/90 transition-all shadow-[0_0_15px_rgba(108,99,255,0.3)]"
-              >
-                <Send size={18} />
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center">
-            <MessageSquare size={48} className="text-[#8888A0]/30 mx-auto mb-3" />
-            <p className="text-sm text-[#8888A0]">Select a conversation to start messaging</p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

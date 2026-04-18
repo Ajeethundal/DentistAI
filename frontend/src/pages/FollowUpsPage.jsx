@@ -113,10 +113,16 @@ export default function FollowUpsPage() {
                 <p className="text-xs text-[#8888A0]">Last visit: {item.last_appointment?.date || 'Unknown'}</p>
               </div>
               <div className="flex items-center gap-2">
-                <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#00D4AA]/10 text-[#00D4AA] text-xs font-medium hover:bg-[#00D4AA]/20 transition-all">
+                <button
+                  onClick={() => handleAction('call', item.id)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#00D4AA]/10 text-[#00D4AA] text-xs font-medium hover:bg-[#00D4AA]/20 transition-all"
+                >
                   <Phone size={12} /> Call
                 </button>
-                <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#6C63FF]/10 text-[#6C63FF] text-xs font-medium hover:bg-[#6C63FF]/20 transition-all">
+                <button
+                  onClick={() => handleAction('whatsapp', item.id)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#6C63FF]/10 text-[#6C63FF] text-xs font-medium hover:bg-[#6C63FF]/20 transition-all"
+                >
                   <MessageSquare size={12} /> WhatsApp
                 </button>
               </div>

@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -14,9 +14,8 @@ import bcrypt
 import jwt as pyjwt
 import uuid
 import json
-import asyncio
 from datetime import datetime, timezone, timedelta
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from bson import ObjectId
 
@@ -419,7 +418,8 @@ async def get_appointments(user: dict = Depends(get_current_user), date_from: Op
     return appointments
 
 @api_router.post("/appointments")
-async def create_appointment(req: AppointmentCreate, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def create_appointment(req: AppointmentCreate, request: Request, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
 
     # Check for appointment conflict
@@ -468,16 +468,23 @@ async def create_appointment(req: AppointmentCreate, user: dict = Depends(get_cu
 
 @api_router.put("/appointments/{appointment_id}")
 async def update_appointment(appointment_id: str, req: AppointmentUpdate, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
     update_data = {k: v for k, v in req.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
-    await db.appointments.update_one({"id": appointment_id}, {"$set": update_data})
-    updated = await db.appointments.find_one({"id": appointment_id}, {"_id": 0})
+    await db.appointments.update_one({"id": appointment_id, "practice_id": practice_id}, {"$set": update_data})
+    updated = await db.appointments.find_one({"id": appointment_id, "practice_id": practice_id}, {"_id": 0})
     return updated
 
 @api_router.delete("/appointments/{appointment_id}")
 async def delete_appointment(appointment_id: str, user: dict = Depends(get_current_user)):
-    await db.appointments.delete_one({"id": appointment_id})
+    practice_id = user.get("practice_id", "")
+    result = await db.appointments.update_one(
+        {"id": appointment_id, "practice_id": practice_id},
+        {"$set": {"status": "deleted", "deleted_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Appointment not found")
     return {"message": "Appointment deleted"}
 
 # --- PATIENTS ---
@@ -523,7 +530,7 @@ async def get_patients(user: dict = Depends(get_current_user), search: Optional[
 
 @api_router.get("/patients/{patient_id}")
 async def get_patient(patient_id: str, user: dict = Depends(get_current_user)):
-    patient = await db.patients.find_one({"id": patient_id}, {"_id": 0})
+    patient = await db.patients.find_one({"id": patient_id, "practice_id": user.get("practice_id", "")}, {"_id": 0})
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     # Get related data
@@ -533,7 +540,8 @@ async def get_patient(patient_id: str, user: dict = Depends(get_current_user)):
     return patient
 
 @api_router.post("/patients")
-async def create_patient(req: PatientCreate, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def create_patient(req: PatientCreate, request: Request, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
     patient_id = str(uuid.uuid4())
     patient = {
@@ -547,11 +555,12 @@ async def create_patient(req: PatientCreate, user: dict = Depends(get_current_us
 
 @api_router.put("/patients/{patient_id}")
 async def update_patient(patient_id: str, req: PatientUpdate, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
     update_data = {k: v for k, v in req.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
-    await db.patients.update_one({"id": patient_id}, {"$set": update_data})
-    updated = await db.patients.find_one({"id": patient_id}, {"_id": 0})
+    await db.patients.update_one({"id": patient_id, "practice_id": practice_id}, {"$set": update_data})
+    updated = await db.patients.find_one({"id": patient_id, "practice_id": practice_id}, {"_id": 0})
     return updated
 
 # --- CALLS ---
@@ -566,7 +575,7 @@ async def get_calls(user: dict = Depends(get_current_user), direction: Optional[
 
 @api_router.get("/calls/{call_id}")
 async def get_call(call_id: str, user: dict = Depends(get_current_user)):
-    call = await db.calls.find_one({"id": call_id}, {"_id": 0})
+    call = await db.calls.find_one({"id": call_id, "practice_id": user.get("practice_id", "")}, {"_id": 0})
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
     return call
@@ -603,7 +612,8 @@ async def get_messages(patient_id: str, user: dict = Depends(get_current_user)):
     return messages
 
 @api_router.post("/messages/send")
-async def send_message(req: MessageSend, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def send_message(req: MessageSend, request: Request, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
     msg = {
         "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": req.patient_id,
@@ -658,7 +668,8 @@ async def get_follow_ups(user: dict = Depends(get_current_user)):
     return {"no_shows": no_shows, "overdue_recalls": overdue[:20], "pending_confirmations": pending}
 
 @api_router.post("/follow-ups/action")
-async def follow_up_action(req: FollowUpAction, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def follow_up_action(req: FollowUpAction, request: Request, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
     patient = await db.patients.find_one({"id": req.patient_id, "practice_id": practice_id}, {"_id": 0})
     patient_name = patient.get("name", "Patient") if patient else "Patient"
@@ -733,7 +744,8 @@ async def get_settings(user: dict = Depends(get_current_user)):
     return practice
 
 @api_router.put("/settings")
-async def update_settings(req: SettingsUpdate, user: dict = Depends(get_current_user)):
+@limiter.limit("10/minute")
+async def update_settings(req: SettingsUpdate, request: Request, user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
     update_data = {k: v for k, v in req.model_dump().items() if v is not None}
     if not update_data:
@@ -751,7 +763,7 @@ async def webhook_retell(request: Request):
     if not verify_retell(signature_header=sig, raw_body=raw):
         raise HTTPException(status_code=401, detail="Invalid Retell signature")
     body = json.loads(raw) if raw else {}
-    logger.info(f"Retell webhook received: {json.dumps(body)[:200]}")
+    logger.info("Retell webhook received: processing call data")
     
     # Process call ended event
     call_data = body.get("call", body)
@@ -762,10 +774,11 @@ async def webhook_retell(request: Request):
     if transcript:
         # Find patient by phone
         patient = await db.patients.find_one({"phone": from_number}, {"_id": 0}) if from_number else None
-        
+        practice_id = patient.get("practice_id", "demo-practice-001") if patient else "demo-practice-001"
+
         # Store call record
         call_record = {
-            "id": call_id, "practice_id": "demo-practice-001",
+            "id": call_id, "practice_id": practice_id,
             "patient_id": patient["id"] if patient else "",
             "patient_name": patient["name"] if patient else f"Unknown — {from_number}",
             "phone": from_number, "direction": call_data.get("direction", "inbound"),
@@ -775,16 +788,16 @@ async def webhook_retell(request: Request):
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         await db.calls.insert_one(call_record)
-        
+
         # Broadcast to WebSocket
         activity = {
-            "id": str(uuid.uuid4()), "practice_id": "demo-practice-001",
-            "type": "call", "description": f"Call processed: {from_number}",
+            "id": str(uuid.uuid4()), "practice_id": practice_id,
+            "type": "call", "description": "Call processed",
             "patient_name": patient["name"] if patient else "Unknown", "status": "done",
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         await db.activity_feed.insert_one(activity)
-        await broadcast_activity("demo-practice-001", activity)
+        await broadcast_activity(practice_id, activity)
     
     return {"status": "received"}
 
@@ -833,7 +846,7 @@ async def webhook_whatsapp(request: Request):
             await db.activity_feed.insert_one(activity)
             await broadcast_activity(patient.get("practice_id", "demo-practice-001"), activity)
     
-    logger.info(f"WhatsApp webhook: from={from_number}, body={message_body[:50]}")
+    logger.info("WhatsApp webhook received: message processed")
     return {"status": "received"}
 
 # --- WEBSOCKET ---
@@ -1622,7 +1635,7 @@ async def startup():
     
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@dentistai.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "DentistAI2026!")
     practice_id = "demo-practice-001"
     
     existing = await db.users.find_one({"email": admin_email})
@@ -1671,7 +1684,7 @@ from backend.paddle_routes import router as paddle_router  # noqa: E402
 app.include_router(paddle_router)
 
 # --- CORS ---
-_frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+_frontend_url = os.environ.get("FRONTEND_URL", "") or os.environ.get("CORS_ORIGINS", "http://localhost:3000")
 _allowed_origins = [o.strip() for o in _frontend_url.split(",") if o.strip()]
 # Safety: never fall back to "*" with allow_credentials=True
 if not _allowed_origins:

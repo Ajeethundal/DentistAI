@@ -1,0 +1,22 @@
+# EB should use Dockerfile only, not docker-compose.yml
+docker-compose.yml
+
+# Standard ignores
+.git
+node_modules
+frontend/build
+frontend/node_modules
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+.env
+.DS_Store
+.vscode
+.idea
+coverage
+*.log
+memory
+test_reports
+.emergent
