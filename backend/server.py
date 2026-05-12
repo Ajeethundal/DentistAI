@@ -1421,12 +1421,41 @@ async def seed_demo_data(practice_id: str):
     "today's schedule", "today's calls", and "recent activity" always look
     populated relative to the current date. This keeps the live demo
     prospect-ready even after long stretches without redeploy.
+
+    Uvicorn runs multiple worker processes; each calls this on startup.
+    We use a MongoDB insert with a unique _id as a lock so exactly one
+    worker per boot does the (delete + reseed). Losers skip silently. The
+    lock document has a TTL so it self-cleans if the seeder crashes.
     """
+    from pymongo.errors import DuplicateKeyError
+
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
+    # --- Inter-worker lock: only one process per boot reseeds ---
+    # The TTL index on `expires_at` (created in startup) auto-deletes stale locks
+    # in case the seeder crashes; otherwise the finally below releases it.
+    lock_id = f"demo_seed_lock::{practice_id}"
+    try:
+        await db.system_state.insert_one({
+            "_id": lock_id,
+            "claimed_at": now.isoformat(),
+            "expires_at": now + timedelta(seconds=60),
+        })
+    except DuplicateKeyError:
+        logger.info("Demo seed: another worker holds the lock — skipping")
+        return
+
+    try:
+        await _seed_demo_data_locked(practice_id, now, today, tomorrow, yesterday)
+    finally:
+        await db.system_state.delete_one({"_id": lock_id})
+
+
+async def _seed_demo_data_locked(practice_id, now, today, tomorrow, yesterday):
+    """Inner seed body — caller already holds the inter-worker lock."""
     existing_patients = await db.patients.find({"practice_id": practice_id}, {"_id": 0}).to_list(500)
     if existing_patients:
         # Refresh only the date-sensitive data; reuse existing patient docs
@@ -1749,6 +1778,8 @@ async def startup():
     await db.appointments.create_index([("practice_id", 1), ("date", 1)])
     await db.calls.create_index([("practice_id", 1), ("created_at", -1)])
     await db.messages.create_index([("practice_id", 1), ("patient_id", 1)])
+    # TTL index on system_state.expires_at — used as a self-cleaning seed lock.
+    await db.system_state.create_index("expires_at", expireAfterSeconds=0)
     await db.activity_feed.create_index([("practice_id", 1), ("created_at", -1)])
     
     # Seed admin
