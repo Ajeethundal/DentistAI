@@ -257,23 +257,26 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
     
     calls_today = await db.calls.count_documents({"practice_id": practice_id, "created_at": {"$regex": f"^{today}"}})
     calls_yesterday = await db.calls.count_documents({"practice_id": practice_id, "created_at": {"$regex": f"^{(datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')}"}})
-    appointments_week = await db.appointments.count_documents({"practice_id": practice_id, "date": {"$gte": this_week_start}})
+    appointments_week = await db.appointments.count_documents({"practice_id": practice_id, "date": {"$gte": this_week_start}, "status": {"$ne": "deleted"}})
     messages_sent = await db.messages.count_documents({"practice_id": practice_id, "direction": "outbound"})
-    total_appts_month = await db.appointments.count_documents({"practice_id": practice_id})
+    total_appts_month = await db.appointments.count_documents({"practice_id": practice_id, "status": {"$ne": "deleted"}})
     no_shows = await db.appointments.count_documents({"practice_id": practice_id, "status": "noshow"})
     no_show_rate = round((no_shows / max(total_appts_month, 1)) * 100, 1)
     
     return {
         "calls_today": calls_today, "calls_yesterday": calls_yesterday,
         "appointments_week": appointments_week, "messages_sent": messages_sent,
-        "no_show_rate": no_show_rate, "total_patients": await db.patients.count_documents({"practice_id": practice_id})
+        "no_show_rate": no_show_rate, "total_patients": await db.patients.count_documents({"practice_id": practice_id, "status": {"$ne": "deleted"}})
     }
 
 @api_router.get("/dashboard/today-schedule")
 async def get_today_schedule(user: dict = Depends(get_current_user)):
     practice_id = user.get("practice_id", "")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    appointments = await db.appointments.find({"practice_id": practice_id, "date": today}, {"_id": 0}).sort("time", 1).to_list(50)
+    appointments = await db.appointments.find(
+        {"practice_id": practice_id, "date": today, "status": {"$ne": "deleted"}},
+        {"_id": 0}
+    ).sort("time", 1).to_list(50)
     return appointments
 
 # --- ACTIVITY FEED ---
@@ -406,7 +409,7 @@ async def get_aria_conversation(conversation_id: str, user: dict = Depends(get_c
 @api_router.get("/appointments")
 async def get_appointments(user: dict = Depends(get_current_user), date_from: Optional[str] = None, date_to: Optional[str] = None):
     practice_id = user.get("practice_id", "")
-    query = {"practice_id": practice_id}
+    query = {"practice_id": practice_id, "status": {"$ne": "deleted"}}
     if date_from:
         query["date"] = {"$gte": date_from}
     if date_to:
@@ -491,7 +494,7 @@ async def delete_appointment(appointment_id: str, user: dict = Depends(get_curre
 @api_router.get("/patients")
 async def get_patients(user: dict = Depends(get_current_user), search: Optional[str] = None):
     practice_id = user.get("practice_id", "")
-    query = {"practice_id": practice_id}
+    query = {"practice_id": practice_id, "status": {"$ne": "deleted"}}
     if search:
         query["$or"] = [
             {"name": {"$regex": search, "$options": "i"}},
@@ -562,6 +565,17 @@ async def update_patient(patient_id: str, req: PatientUpdate, user: dict = Depen
     await db.patients.update_one({"id": patient_id, "practice_id": practice_id}, {"$set": update_data})
     updated = await db.patients.find_one({"id": patient_id, "practice_id": practice_id}, {"_id": 0})
     return updated
+
+@api_router.delete("/patients/{patient_id}")
+async def delete_patient(patient_id: str, user: dict = Depends(get_current_user)):
+    practice_id = user.get("practice_id", "")
+    result = await db.patients.update_one(
+        {"id": patient_id, "practice_id": practice_id},
+        {"$set": {"status": "deleted", "deleted_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return {"message": "Patient deleted"}
 
 # --- CALLS ---
 @api_router.get("/calls")
@@ -1400,17 +1414,33 @@ async def get_integrations_status(user: dict = Depends(get_current_user)):
 
 # --- DEMO DATA SEEDING ---
 async def seed_demo_data(practice_id: str):
-    """Seed rich demo data for the practice"""
-    existing = await db.patients.find_one({"practice_id": practice_id})
-    if existing:
-        return
-    
-    logger.info("Seeding demo data...")
+    """Seed rich demo data for the practice.
+
+    Patients are seeded ONCE (they're not date-sensitive). Appointments,
+    calls, messages, and activity feed are re-seeded on every boot so that
+    "today's schedule", "today's calls", and "recent activity" always look
+    populated relative to the current date. This keeps the live demo
+    prospect-ready even after long stretches without redeploy.
+    """
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    
+
+    existing_patients = await db.patients.find({"practice_id": practice_id}, {"_id": 0}).to_list(500)
+    if existing_patients:
+        # Refresh only the date-sensitive data; reuse existing patient docs
+        # (preserves their IDs so any custom data the user added stays linked).
+        logger.info("Refreshing date-sensitive demo data (patients preserved)...")
+        await db.appointments.delete_many({"practice_id": practice_id})
+        await db.calls.delete_many({"practice_id": practice_id})
+        await db.messages.delete_many({"practice_id": practice_id})
+        await db.activity_feed.delete_many({"practice_id": practice_id})
+        patients = existing_patients
+        await _seed_demo_time_sensitive(practice_id, patients, now, today, tomorrow, yesterday)
+        return
+
+    logger.info("Seeding demo data (full)...")
     # 12 Demo patients
     patients = [
         {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Sarah Mitchell", "phone": "+1-555-0101", "email": "sarah.m@email.com", "status": "active", "total_visits": 8, "notes": "Prefers morning appointments", "created_at": (now - timedelta(days=365)).isoformat()},
@@ -1427,7 +1457,14 @@ async def seed_demo_data(practice_id: str):
         {"id": str(uuid.uuid4()), "practice_id": practice_id, "name": "Tom Nguyen", "phone": "+1-555-0112", "email": "tom.n@email.com", "status": "new", "total_visits": 1, "notes": "First visit consultation done", "created_at": (now - timedelta(days=7)).isoformat()},
     ]
     await db.patients.insert_many(patients)
-    
+
+    await _seed_demo_time_sensitive(practice_id, patients, now, today, tomorrow, yesterday)
+
+
+async def _seed_demo_time_sensitive(practice_id, patients, now, today, tomorrow, yesterday):
+    """Seed appointments / calls / messages / activity_feed for the demo
+    practice using fresh dates around `now`. Safe to call repeatedly — caller
+    is responsible for clearing the collections first."""
     treatments = ["Cleaning", "X-ray", "Crown", "Root Canal", "Extraction", "Consultation", "Filling", "Whitening"]
     statuses_past = ["completed", "completed", "completed", "noshow", "completed", "cancelled"]
     times = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30", "16:00"]
