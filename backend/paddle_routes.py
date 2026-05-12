@@ -30,7 +30,7 @@ PLAN_CATALOG: Dict[str, Dict[str, Any]] = {
     "starter": {
         "slug": "starter",
         "name": "Starter",
-        "price_display": "£49",
+        "price_display": "$99",
         "interval": "month",
         "description": "For solo practitioners getting started with AI.",
         "features": [
@@ -46,7 +46,7 @@ PLAN_CATALOG: Dict[str, Dict[str, Any]] = {
     "growth": {
         "slug": "growth",
         "name": "Growth",
-        "price_display": "£99",
+        "price_display": "$249",
         "interval": "month",
         "description": "For growing practices ready to automate the phones.",
         "features": [
@@ -63,7 +63,7 @@ PLAN_CATALOG: Dict[str, Dict[str, Any]] = {
     "pro": {
         "slug": "pro",
         "name": "Pro",
-        "price_display": "£199",
+        "price_display": "$499",
         "interval": "month",
         "description": "For busy practices that need a full AI front desk.",
         "features": [

@@ -614,12 +614,48 @@ async def get_messages(patient_id: str, user: dict = Depends(get_current_user)):
 @api_router.post("/messages/send")
 @limiter.limit("30/minute")
 async def send_message(req: MessageSend, request: Request, user: dict = Depends(get_current_user)):
+    """Send a WhatsApp message to a patient. Dispatches via Twilio when configured,
+    falls back to demo/db-only mode when not (or when DEMO_MODE=true)."""
     practice_id = user.get("practice_id", "")
+
+    # Look up patient to get phone number
+    patient = await db.patients.find_one({"id": req.patient_id, "practice_id": practice_id}, {"_id": 0})
+    patient_phone = patient.get("phone", "") if patient else ""
+
+    # Build the stored record
     msg = {
         "id": str(uuid.uuid4()), "practice_id": practice_id, "patient_id": req.patient_id,
         "direction": "outbound", "body": req.body, "sender": "doctor",
         "read": True, "created_at": datetime.now(timezone.utc).isoformat()
     }
+
+    # --- Try to actually send via Twilio if credentials are present ---
+    from backend.demo_mode import is_demo
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    auth_token  = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    api_key     = os.environ.get("TWILIO_API_KEY", "")
+    api_secret  = os.environ.get("TWILIO_API_KEY_SECRET", "")
+    from_number = os.environ.get("TWILIO_WHATSAPP_FROM", "")
+    has_twilio  = account_sid and (auth_token or (api_key and api_secret)) and from_number
+
+    twilio_sid = None
+    if not is_demo() and has_twilio and patient_phone:
+        try:
+            from twilio.rest import Client
+            twilio_client = (
+                Client(api_key, api_secret, account_sid=account_sid)
+                if api_key and api_secret
+                else Client(account_sid, auth_token)
+            )
+            to_wa   = f"whatsapp:{patient_phone}" if not patient_phone.startswith("whatsapp:") else patient_phone
+            from_wa = f"whatsapp:{from_number}"   if not from_number.startswith("whatsapp:")  else from_number
+            twilio_msg = twilio_client.messages.create(body=req.body, from_=from_wa, to=to_wa)
+            twilio_sid = twilio_msg.sid
+            msg["twilio_sid"] = twilio_sid
+        except Exception as e:
+            logger.error(f"Twilio send error in /messages/send: {e}")
+            # Don't crash — still store the message so the UI stays consistent
+
     await db.messages.insert_one(msg)
     msg_copy = {k: v for k, v in msg.items() if k != "_id"}
     return msg_copy
@@ -677,15 +713,51 @@ async def follow_up_action(req: FollowUpAction, request: Request, user: dict = D
     practice_name = practice.get("name", "the dental practice") if practice else "the dental practice"
 
     if req.action == "call":
-        call_record = {
-            "id": str(uuid.uuid4()), "practice_id": practice_id,
-            "patient_id": req.patient_id,
-            "patient_name": patient_name,
-            "phone": patient.get("phone", "") if patient else "",
-            "direction": "outbound", "duration_secs": 0,
-            "transcript": [], "outcome": "follow-up",
+        patient_phone = patient.get("phone", "") if patient else ""
+        from backend.demo_mode import is_demo, generate_mock_call
+        retell_key = os.environ.get("RETELL_API_KEY", "")
+
+        call_record_id = str(uuid.uuid4())
+        call_record: dict = {
+            "id": call_record_id, "practice_id": practice_id,
+            "patient_id": req.patient_id, "patient_name": patient_name,
+            "phone": patient_phone, "direction": "outbound",
+            "duration_secs": 0, "transcript": [], "outcome": "follow-up",
             "created_at": datetime.now(timezone.utc).isoformat()
         }
+
+        if is_demo() or not retell_key:
+            # Demo path — generate a scripted mock call
+            mock = generate_mock_call(patient_name, patient_phone, "follow-up")
+            call_record.update({
+                "id": mock["call_id"],
+                "duration_secs": mock["duration_secs"],
+                "transcript": mock["transcript"],
+                "outcome": mock["outcome"],
+                "summary": mock.get("summary", ""),
+                "status": "completed",
+            })
+        elif patient_phone:
+            # Live path — fire real Retell call
+            try:
+                from retell import Retell
+                retell_client = Retell(api_key=retell_key)
+                agents = retell_client.agent.list()
+                if agents:
+                    practice_doc = await db.practices.find_one({"practice_id": practice_id}, {"_id": 0})
+                    from_number = (practice_doc or {}).get("retell_phone", "")
+                    if from_number:
+                        call_response = retell_client.call.create_phone_call(
+                            from_number=from_number,
+                            to_number=patient_phone,
+                            override_agent_id=agents[0].agent_id,
+                            retell_llm_dynamic_variables={"patient_name": patient_name, "objective": "follow-up"}
+                        )
+                        call_record["id"] = call_response.call_id
+                        call_record["status"] = "initiated"
+            except Exception as e:
+                logger.error(f"Retell follow-up call error: {e}")
+
         await db.calls.insert_one(call_record)
         activity = {
             "id": str(uuid.uuid4()), "practice_id": practice_id,
@@ -945,7 +1017,7 @@ async def make_retell_call(req: RetellCallRequest, user: dict = Depends(_require
         if not from_number:
             return {"status": "demo", "message": f"Call queued to {req.to_number} for {req.patient_name}. Configure a Retell phone number in Settings to make real calls.", "agent_id": agent_id}
         
-        call_response = retell_client.call.createPhoneCall(
+        call_response = retell_client.call.create_phone_call(
             from_number=from_number,
             to_number=req.to_number,
             override_agent_id=agent_id,
@@ -1693,10 +1765,20 @@ from backend.paddle_routes import router as paddle_router  # noqa: E402
 app.include_router(paddle_router)
 
 # --- CORS ---
-_frontend_url = os.environ.get("FRONTEND_URL", "") or os.environ.get("CORS_ORIGINS", "http://localhost:3000")
-_allowed_origins = [o.strip() for o in _frontend_url.split(",") if o.strip()]
+# Merge both FRONTEND_URL and CORS_ORIGINS so neither silently wins over the other.
+_cors_raw = ",".join(filter(None, [
+    os.environ.get("FRONTEND_URL", ""),
+    os.environ.get("CORS_ORIGINS", ""),
+]))
+_allowed_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()]
 if not _allowed_origins:
-    _allowed_origins = ["http://localhost:3000"]
+    _allowed_origins = [
+        "http://localhost:3000",
+        "https://0-ai00.vercel.app",
+    ]
+# Always include the production Vercel URL in the explicit allowlist.
+if "https://0-ai00.vercel.app" not in _allowed_origins:
+    _allowed_origins.append("https://0-ai00.vercel.app")
 
 app.add_middleware(
     CORSMiddleware,

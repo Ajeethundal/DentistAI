@@ -173,7 +173,10 @@ export default function FollowUpsPage() {
                 <p className="text-sm font-medium text-[#F0F0F5]">{item.patient_name}</p>
                 <p className="text-xs text-[#8888A0]">{item.date} at {item.time} · {item.treatment_type}</p>
               </div>
-              <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#6C63FF]/10 text-[#6C63FF] text-xs font-medium hover:bg-[#6C63FF]/20 transition-all">
+              <button
+                onClick={() => handleAction('whatsapp', item.patient_id, item.id)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#6C63FF]/10 text-[#6C63FF] text-xs font-medium hover:bg-[#6C63FF]/20 transition-all"
+              >
                 <MessageSquare size={12} /> Send Reminder
               </button>
             </div>

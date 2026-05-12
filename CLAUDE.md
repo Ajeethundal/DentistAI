@@ -6,14 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DentistAI is a dental practice management SaaS with an AI receptionist (ARIA). Features: appointment scheduling, patient management, WhatsApp messaging (Twilio), AI voice calls (Retell), subscription billing (Paddle), and a Claude-powered chat assistant.
 
-Live frontend: https://0-ai00.vercel.app — Login: `admin@dentistai.com` / `admin123`
+Live frontend: https://0-ai00.vercel.app — Login: `admin@dentistai.com` / `DentistAI2026!` (matches `ADMIN_PASSWORD` default in `server.py`; override via env var to rotate)
 
 ## Commands
 
 ### Backend
 ```bash
 # Run locally (requires MongoDB on localhost:27017 or MONGO_URL set)
-cd backend && pip install -r requirements.txt && python -m uvicorn server:app --reload --port 8000
+# IMPORTANT: must run from the PROJECT ROOT (DentistAI/), not from inside backend/
+# because server.py uses "from backend.xxx" package imports.
+pip install -r backend/requirements.txt
+python -m uvicorn backend.server:app --reload --port 8000
 
 # Run with Docker (includes MongoDB)
 docker compose up -d
@@ -72,9 +75,12 @@ Reference: `backend/.env.example`. Core vars:
 - `backend/.env` is gitignored; `.env.example` is the reference
 - CORS requires exact origins in `FRONTEND_URL` (no wildcard with credentials)
 - Admin user re-seeded on every boot — changing `ADMIN_PASSWORD` env resets the password
-- Anthropic model is `claude-sonnet-4-5-20250929` in `aria_client.py`
+- Anthropic model default is `claude-sonnet-4-5-20250929` in `aria_client.py` — override with `ANTHROPIC_MODEL` env var if needed
 - Paddle webhook signature verification fails open if `PADDLE_WEBHOOK_SECRET` is unset
 - Twilio webhook validation uses full URL including scheme — needs correct `X-Forwarded-Proto`/`X-Forwarded-Host` behind a proxy
+- **Retell SDK**: use `retell_client.call.create_phone_call(...)` (snake_case) — retell-sdk v4+ dropped camelCase aliases
+- **`/messages/send`** now dispatches via Twilio when `TWILIO_*` creds are present; previously only stored to DB
+- **Follow-up "Call" action** now triggers real Retell call (or demo mock) instead of a blank stub record
 
 ## Deployment
 
